@@ -2,7 +2,7 @@
 
 ## Product Vision
 
-Build an AI-native operating system for export/import SMEs that automates documentation, compliance, communication, shipment coordination, and operational workflows using autonomous AI agents.
+Build an AI-native operating system for export/import SMEs that automates documentation, compliance, communication, shipment coordination, and operational workflows using autonomous AI agents. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.
 
 Target Market:
 • Exporters
