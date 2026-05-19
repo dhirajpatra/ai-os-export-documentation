@@ -3,8 +3,6 @@
 # Full stack: API + DB + Redis + Kafka + Temporal + PaddleOCR
 # ============================================================
 
-version: "3.9"
-
 services:
 
   # ── FastAPI Backend ───────────────────────────────────────
@@ -50,10 +48,10 @@ services:
       POSTGRES_PASSWORD: tradeos
       POSTGRES_DB:       tradeos
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./schemas/001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql
+      - ./001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tradeos"]
       interval: 5s
@@ -66,7 +64,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
       - redisdata:/data
     healthcheck:

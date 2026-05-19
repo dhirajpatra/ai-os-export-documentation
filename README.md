@@ -38,8 +38,7 @@ tradeos/
 │   ├── prompt_registry.py       ← Versioned prompt store with fallback chains
 │   └── rbac.py                  ← Roles, permissions, approval chains, JWT auth
 │
-├── schemas/
-│   └── 001_core_schema.sql      ← Full PostgreSQL schema (multi-tenant, audit-ready)
+├── 001_core_schema.sql          ← Full PostgreSQL schema (multi-tenant, audit-ready)
 │
 ├── config/                      ← Environment configs per deployment
 ├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Kafka, Temporal, OCR
@@ -118,15 +117,25 @@ cp .env.example .env
 # Fill in: ANTHROPIC_API_KEY, OPENAI_API_KEY, WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, JWT_SECRET
 ```
 
-### 2. Start infrastructure
+### 2. Start the stack
 ```bash
-docker compose up -d postgres redis kafka temporal
+docker compose up -d --build api
 ```
 
-### 3. Run API
+Postgres and Redis use non-default host ports to avoid colliding with services
+already running on your machine:
+
+- Postgres: `localhost:5433` -> container `5432`
+- Redis: `localhost:6380` -> container `6379`
+
+Override them if needed:
 ```bash
-pip install -r requirements.txt
-uvicorn services.api.main:app --reload --port 8000
+POSTGRES_HOST_PORT=5432 REDIS_HOST_PORT=6379 docker compose up -d postgres redis
+```
+
+### 3. Check services
+```bash
+docker compose ps
 ```
 
 ### 4. Run killer demo
