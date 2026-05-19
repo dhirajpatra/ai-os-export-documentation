@@ -1,0 +1,182 @@
+# ============================================================
+# TradeOS — Docker Compose
+# Full stack: API + DB + Redis + Kafka + Temporal + PaddleOCR
+# ============================================================
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI Backend ───────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://tradeos:tradeos@postgres:5432/tradeos
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - TEMPORAL_HOST=temporal:7233
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
+      - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
+      - JWT_SECRET=${JWT_SECRET}
+      - S3_BUCKET=${S3_BUCKET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - tradeos
+
+  # ── PostgreSQL + pgvector ─────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER:     tradeos
+      POSTGRES_PASSWORD: tradeos
+      POSTGRES_DB:       tradeos
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schemas/001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradeos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - tradeos
+
+  # ── Redis (hot cache + rate limiting) ────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - tradeos
+
+  # ── Kafka (event bus) ─────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - tradeos
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT:        zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS:     PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    depends_on:
+      - zookeeper
+    networks:
+      - tradeos
+
+  # ── Temporal (durable workflow execution) ─────────────────
+  temporal:
+    image: temporalio/auto-setup:1.22
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=tradeos
+      - POSTGRES_PWD=tradeos
+      - POSTGRES_SEEDS=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - tradeos
+
+  temporal-ui:
+    image: temporalio/ui:2.21
+    ports:
+      - "8088:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+    networks:
+      - tradeos
+
+  # ── PaddleOCR Service ─────────────────────────────────────
+  ocr:
+    image: paddlepaddle/paddle:2.6.0
+    command: >
+      python -m uvicorn ocr_service:app --host 0.0.0.0 --port 8100
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./services/ocr:/app
+    working_dir: /app
+    networks:
+      - tradeos
+
+  # ── Local LLM Fallback (Ollama) ───────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollamadata:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - tradeos
+
+  # ── WhatsApp Webhook Proxy (ngrok in dev) ─────────────────
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: http api:8000 --domain=${NGROK_DOMAIN}
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - api
+    profiles:
+      - dev
+    networks:
+      - tradeos
+
+volumes:
+  pgdata:
+  redisdata:
+  ollamadata:
+
+networks:
+  tradeos:
+    driver: bridge

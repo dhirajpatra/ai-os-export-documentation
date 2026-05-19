@@ -1,0 +1,76 @@
+# TradeOS — Python Dependencies
+# Pin major versions; minor/patch managed by pip-compile
+
+# ── API Framework ─────────────────────────────────────────
+fastapi==0.111.*
+uvicorn[standard]==0.30.*
+pydantic==2.7.*
+python-multipart==0.0.*          # file uploads
+
+# ── Database ──────────────────────────────────────────────
+asyncpg==0.29.*
+sqlalchemy[asyncio]==2.0.*
+alembic==1.13.*
+pgvector==0.2.*                  # pgvector Python client
+
+# ── Cache ─────────────────────────────────────────────────
+redis[hiredis]==5.0.*
+
+# ── Messaging ─────────────────────────────────────────────
+aiokafka==0.10.*
+
+# ── Workflow (Temporal) ───────────────────────────────────
+temporalio==1.5.*
+
+# ── LLM Providers ─────────────────────────────────────────
+anthropic==0.25.*
+openai==1.30.*
+google-generativeai==0.5.*
+httpx==0.27.*                    # async HTTP (LLM calls)
+
+# ── OCR & Document Intelligence ───────────────────────────
+paddlepaddle==2.6.*              # or paddlepaddle-gpu for CUDA
+paddleocr==2.7.*
+pillow==10.3.*
+pypdf==4.2.*
+python-docx==1.1.*
+openpyxl==3.1.*
+weasyprint==62.*                 # HTML→PDF generation
+reportlab==4.1.*                 # PDF programmatic generation
+
+# ── NLP & Translation ─────────────────────────────────────
+langdetect==1.0.*
+deep-translator==1.11.*
+
+# ── Embeddings (local fallback) ───────────────────────────
+sentence-transformers==3.0.*
+torch==2.3.*
+
+# ── Auth ──────────────────────────────────────────────────
+python-jose[cryptography]==3.3.*
+passlib[bcrypt]==1.7.*
+
+# ── Storage ───────────────────────────────────────────────
+boto3==1.34.*                    # AWS S3
+google-cloud-storage==2.16.*     # GCS
+
+# ── Observability ─────────────────────────────────────────
+opentelemetry-api==1.24.*
+opentelemetry-sdk==1.24.*
+opentelemetry-exporter-otlp==1.24.*
+prometheus-fastapi-instrumentator==7.0.*
+structlog==24.2.*
+
+# ── Utilities ─────────────────────────────────────────────
+python-dotenv==1.0.*
+pydantic-settings==2.2.*
+tenacity==8.3.*                  # retry logic
+aiofiles==23.2.*
+orjson==3.10.*                   # fast JSON
+
+# ── Dev & Testing ─────────────────────────────────────────
+pytest==8.2.*
+pytest-asyncio==0.23.*
+httpx==0.27.*                    # test client
+factory-boy==3.3.*
+Faker==25.2.*
