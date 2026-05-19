@@ -39,9 +39,10 @@ class Settings:
     # LLM Provider chain (tried in order, with fallback)
     LLM_CHAIN = [
         {"provider": "openai",    "model": "gpt-4o",           "priority": 1},
-        {"provider": "anthropic", "model": "claude-opus-4-6",  "priority": 2},
-        {"provider": "gemini",    "model": "gemini-2.0-flash",  "priority": 3},
-        {"provider": "local",     "model": "mistral-7b-q4",    "priority": 4},
+        {"provider": "grok",      "model": "grok-4",           "priority": 2},
+        {"provider": "anthropic", "model": "claude-opus-4-6",  "priority": 3},
+        {"provider": "gemini",    "model": "gemini-2.0-flash",  "priority": 4},
+        {"provider": "local",     "model": "mistral-7b-q4",    "priority": 5},
     ]
 
     # Workflow
@@ -186,6 +187,8 @@ class LLMRouter:
 
         if provider == "openai":
             return await LLMRouter._openai(model, system_prompt, user_prompt, max_tokens, temperature)
+        elif provider == "grok":
+            return await LLMRouter._grok(model, system_prompt, user_prompt, max_tokens, temperature)
         elif provider == "anthropic":
             return await LLMRouter._anthropic(model, system_prompt, user_prompt, max_tokens, temperature)
         elif provider == "gemini":
@@ -227,6 +230,28 @@ class LLMRouter:
                 headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY','')}"},
                 json={
                     "model": model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user},
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"text": data["choices"][0]["message"]["content"]}
+
+    @staticmethod
+    async def _grok(model, system, user, max_tokens, temperature) -> dict:
+        import os
+        base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {os.getenv('XAI_API_KEY','')}"},
+                json={
+                    "model": os.getenv("XAI_MODEL", model),
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "messages": [

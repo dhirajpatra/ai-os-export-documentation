@@ -19,6 +19,9 @@ services:
       - TEMPORAL_HOST=temporal:7233
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - XAI_API_KEY=${XAI_API_KEY}
+      - XAI_MODEL=${XAI_MODEL:-grok-4}
+      - XAI_BASE_URL=${XAI_BASE_URL:-https://api.x.ai/v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - WHATSAPP_PROVIDER=${WHATSAPP_PROVIDER:-meta}
       - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}

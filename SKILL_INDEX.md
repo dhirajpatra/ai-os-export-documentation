@@ -33,7 +33,7 @@ tradeos/
 │       └── main.py                ← SINGLE entry point for Phase 1
 │           Contains:
 │           • FastAPI app + all routes
-│           • LLMRouter (OpenAI → Claude → Gemini → Ollama)
+│           • LLMRouter (OpenAI → Grok → Claude → Gemini → Ollama)
 │           • BaseAgent (all agents extend this)
 │           • POExtractionAgent
 │           • HSCodeValidationAgent
@@ -178,9 +178,10 @@ When a model changes behaviour, bump the prompt version. Old version remains act
 
 ```
 1. OpenAI GPT-4o      (priority 1)
-2. Anthropic Claude   (priority 2)
-3. Google Gemini      (priority 3)
-4. Ollama local       (priority 4 — always-on fallback)
+2. xAI Grok           (priority 2)
+3. Anthropic Claude   (priority 3)
+4. Google Gemini      (priority 4)
+5. Ollama local       (priority 5 — always-on fallback)
 ```
 
 **Never reference a specific model name in business logic.** Never bypass `LLMRouter`. Models change every 6 months. The router is the only coupling point.
@@ -266,6 +267,9 @@ Feed 10 completed workflows, verify semantic recall returns relevant context.
 # LLM providers
 ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
+XAI_API_KEY=xai-...
+XAI_MODEL=grok-4
+XAI_BASE_URL=https://api.x.ai/v1
 GEMINI_API_KEY=...
 
 # Database

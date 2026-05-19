@@ -216,9 +216,10 @@ Tried in priority order. Automatic fallback on error.
 
 ```
 1. OpenAI GPT-4o          (priority 1 — speed + tool use)
-2. Anthropic Claude        (priority 2 — best for long docs)
-3. Google Gemini 2.0 Flash (priority 3 — multimodal)
-4. Local Ollama/Mistral    (priority 4 — always-on fallback, no API cost)
+2. xAI Grok               (priority 2 — OpenAI-compatible API)
+3. Anthropic Claude        (priority 3 — best for long docs)
+4. Google Gemini 2.0 Flash (priority 4 — multimodal)
+5. Local Ollama/Mistral    (priority 5 — always-on fallback, no API cost)
 ```
 
 Switch priority or disable providers in `Settings.LLM_CHAIN`. **Never hardcode a model.**
