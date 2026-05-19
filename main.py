@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -51,10 +52,14 @@ class Settings:
     S3_BUCKET = "tradeos-documents"
 
     # WhatsApp
+    WHATSAPP_PROVIDER   = "meta"  # meta | twilio
     WHATSAPP_API_URL    = "https://graph.facebook.com/v18.0"
     WHATSAPP_TOKEN      = ""  # from env
     WHATSAPP_PHONE_ID   = ""  # from env
     WHATSAPP_VERIFY_TOKEN = ""
+    TWILIO_ACCOUNT_SID  = ""
+    TWILIO_AUTH_TOKEN   = ""
+    TWILIO_PHONE_NUMBER = ""
 
     # Auth
     JWT_SECRET      = ""  # from env
@@ -710,7 +715,20 @@ class WhatsAppService:
 
     @staticmethod
     async def send_text(to: str, body: str) -> dict:
-        import os
+        provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
+        if provider == "twilio":
+            return await WhatsAppService._send_twilio_text(to, body)
+        return await WhatsAppService._send_meta_text(to, body)
+
+    @staticmethod
+    async def send_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
+        provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
+        if provider == "twilio":
+            return await WhatsAppService._send_twilio_document(to, doc_url, filename, caption)
+        return await WhatsAppService._send_meta_document(to, doc_url, filename, caption)
+
+    @staticmethod
+    async def _send_meta_text(to: str, body: str) -> dict:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{cfg.WHATSAPP_API_URL}/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
@@ -726,8 +744,7 @@ class WhatsAppService:
             return resp.json()
 
     @staticmethod
-    async def send_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
-        import os
+    async def _send_meta_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{cfg.WHATSAPP_API_URL}/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
@@ -743,8 +760,52 @@ class WhatsAppService:
             return resp.json()
 
     @staticmethod
-    def parse_inbound(payload: dict) -> list[dict]:
-        """Parse WhatsApp webhook → list of message dicts."""
+    async def _send_twilio_text(to: str, body: str) -> dict:
+        account_sid = WhatsAppService._env("TWILIO_ACCOUNT_SID")
+        auth_token = WhatsAppService._env("TWILIO_AUTH_TOKEN")
+        from_number = WhatsAppService._twilio_whatsapp_number(
+            WhatsAppService._env("TWILIO_PHONE_NUMBER")
+        )
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+                auth=(account_sid, auth_token),
+                data={
+                    "From": from_number,
+                    "To": WhatsAppService._twilio_whatsapp_number(to),
+                    "Body": body,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    @staticmethod
+    async def _send_twilio_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
+        account_sid = WhatsAppService._env("TWILIO_ACCOUNT_SID")
+        auth_token = WhatsAppService._env("TWILIO_AUTH_TOKEN")
+        from_number = WhatsAppService._twilio_whatsapp_number(
+            WhatsAppService._env("TWILIO_PHONE_NUMBER")
+        )
+        body = caption or filename
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+                auth=(account_sid, auth_token),
+                data={
+                    "From": from_number,
+                    "To": WhatsAppService._twilio_whatsapp_number(to),
+                    "Body": body,
+                    "MediaUrl": doc_url,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    @staticmethod
+    def parse_meta_inbound(payload: dict) -> list[dict]:
+        """Parse Meta WhatsApp webhook → list of message dicts."""
         messages = []
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
@@ -759,6 +820,48 @@ class WhatsAppService:
                         "contact":   value.get("contacts", [{}])[0],
                     })
         return messages
+
+    @staticmethod
+    def parse_twilio_inbound(form: dict) -> list[dict]:
+        """Parse Twilio WhatsApp webhook form data → list of message dicts."""
+        text = form.get("Body", "")
+        media_urls = [
+            form.get(f"MediaUrl{i}")
+            for i in range(int(form.get("NumMedia", "0") or 0))
+            if form.get(f"MediaUrl{i}")
+        ]
+        return [{
+            "from": WhatsAppService._strip_twilio_whatsapp_prefix(form.get("From", "")),
+            "wa_msg_id": form.get("MessageSid") or form.get("SmsSid"),
+            "type": "document" if media_urls else "text",
+            "text": text,
+            "timestamp": datetime.utcnow().isoformat(),
+            "contact": {
+                "profile": {"name": form.get("ProfileName", "")},
+                "wa_id": WhatsAppService._strip_twilio_whatsapp_prefix(form.get("WaId", "")),
+            },
+            "media_urls": media_urls,
+            "provider": "twilio",
+        }]
+
+    @staticmethod
+    def _twilio_whatsapp_number(number: str) -> str:
+        if number.startswith("whatsapp:"):
+            return number
+        return f"whatsapp:{number}"
+
+    @staticmethod
+    def _strip_twilio_whatsapp_prefix(number: str) -> str:
+        return number.removeprefix("whatsapp:")
+
+    @staticmethod
+    def _env(name: str) -> str:
+        # Backward compatible with the current env typo: TWIlIO_*.
+        legacy_name = name.replace("TWILIO", "TWIlIO")
+        value = os.getenv(name) or os.getenv(legacy_name) or getattr(cfg, name, "")
+        if not value:
+            raise RuntimeError(f"{name} is required for Twilio WhatsApp")
+        return value
 
 
 # ─────────────────────────────────────────────
@@ -988,7 +1091,8 @@ async def whatsapp_verify(
     hub_verify_token: str | None = None,
 ):
     """WhatsApp webhook verification handshake."""
-    if hub_mode == "subscribe" and hub_verify_token == cfg.WHATSAPP_VERIFY_TOKEN:
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", cfg.WHATSAPP_VERIFY_TOKEN)
+    if hub_mode == "subscribe" and hub_verify_token == verify_token:
         return int(hub_challenge)
     raise HTTPException(status_code=403, detail="Verification failed")
 
@@ -999,9 +1103,26 @@ async def whatsapp_inbound(
     background_tasks: BackgroundTasks,
 ):
     """Receive inbound WhatsApp messages → trigger workflow."""
-    messages = WhatsAppService.parse_inbound(payload.model_dump())
+    messages = WhatsAppService.parse_meta_inbound(payload.model_dump())
     for msg in messages:
         # Async: don't block the webhook response
+        background_tasks.add_task(
+            _process_inbound_whatsapp,
+            msg,
+            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),  # resolve from phone
+        )
+    return {"status": "received"}
+
+
+@app.post("/api/v1/webhooks/twilio/whatsapp")
+async def twilio_whatsapp_inbound(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    """Receive inbound Twilio WhatsApp messages → trigger workflow."""
+    form = dict(await request.form())
+    messages = WhatsAppService.parse_twilio_inbound(form)
+    for msg in messages:
         background_tasks.add_task(
             _process_inbound_whatsapp,
             msg,

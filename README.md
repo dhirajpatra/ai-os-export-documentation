@@ -114,8 +114,19 @@ curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
 ### 1. Environment
 ```bash
 cp .env.example .env
-# Fill in: ANTHROPIC_API_KEY, OPENAI_API_KEY, WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, JWT_SECRET
+# Fill in: JWT_SECRET and either Twilio or Meta WhatsApp credentials.
 ```
+
+For the MVP Twilio WhatsApp path, keep:
+```bash
+WHATSAPP_PROVIDER=twilio
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_PHONE_NUMBER=whatsapp:+14155238886
+```
+
+The direct Meta WhatsApp option remains available with `WHATSAPP_PROVIDER=meta`
+and `WHATSAPP_TOKEN` / `WHATSAPP_PHONE_ID`.
 
 ### 2. Start the stack
 ```bash
@@ -153,7 +164,8 @@ curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
 ### 5. Dev with WhatsApp
 ```bash
 docker compose --profile dev up ngrok
-# Webhook URL: https://<ngrok-domain>/api/v1/webhooks/whatsapp
+# Twilio webhook URL: https://<ngrok-domain>/api/v1/webhooks/twilio/whatsapp
+# Meta webhook URL: https://<ngrok-domain>/api/v1/webhooks/whatsapp
 ```
 
 ---
@@ -193,7 +205,8 @@ docker compose --profile dev up ngrok
 | Method | Path | Description |
 |--------|------|-------------|
 | GET  | `/api/v1/webhooks/whatsapp` | Verification handshake |
-| POST | `/api/v1/webhooks/whatsapp` | Inbound message handler |
+| POST | `/api/v1/webhooks/whatsapp` | Meta inbound message handler |
+| POST | `/api/v1/webhooks/twilio/whatsapp` | Twilio inbound message handler |
 
 ---
 
