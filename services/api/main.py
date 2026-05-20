@@ -1205,6 +1205,15 @@ class KillerDemoWorkflow:
 async def lifespan(app: FastAPI):
     # startup
     print("🚀 TradeOS API starting — connecting to DB, Kafka, Temporal…")
+
+    # ── Dependency checks ──────────────────────────────────
+    try:
+        from pypdf import PdfReader  # noqa: F401
+        print("✅ pypdf available — text-layer PDF extraction enabled")
+    except ImportError:
+        print("⚠️  pypdf NOT installed. PDF text extraction will fall back to PaddleOCR.")
+        print("   Fix: add 'pypdf' to requirements.txt and rebuild the image.")
+
     yield
     # shutdown
     print("🛑 TradeOS API shutting down…")
@@ -1427,6 +1436,12 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
             raw_input=raw_input,
         )
         result = await engine.run()
+
+        # WorkflowEngine completed but a step failed — log which step and fall through to fallback
+        if result.get("status") == "failed":
+            step_statuses = result.get("step_statuses", {})
+            print(f"[WA workflow] WorkflowEngine step failure: {step_statuses}")
+            raise RuntimeError(f"WorkflowEngine returned failed. Steps: {step_statuses}")
 
     except Exception as primary_exc:
         import traceback

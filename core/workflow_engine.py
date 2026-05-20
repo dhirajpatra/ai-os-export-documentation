@@ -140,13 +140,16 @@ class WorkflowEngine:
         for step_name in self.step_order:
             step = self.steps[step_name]
 
-            # Check dependencies
-            for dep in step.depends_on:
-                dep_result = self.step_statuses.get(dep)
-                if not dep_result or dep_result.status != StepStatus.COMPLETED:
-                    await self._emit("step.skipped", {"step": step_name, "reason": f"dep {dep} not met"})
-                    self.step_statuses[step_name] = StepResult(status=StepStatus.SKIPPED)
-                    continue
+            # Check dependencies — ALL must be COMPLETED, else skip this step
+            unmet_deps = [
+                dep for dep in step.depends_on
+                if not self.step_statuses.get(dep)
+                or self.step_statuses[dep].status != StepStatus.COMPLETED
+            ]
+            if unmet_deps:
+                await self._emit("step.skipped", {"step": step_name, "reason": f"unmet deps: {unmet_deps}"})
+                self.step_statuses[step_name] = StepResult(status=StepStatus.SKIPPED)
+                continue
 
             result = await self._run_step(step)
             self.step_statuses[step_name] = result
@@ -198,7 +201,10 @@ class WorkflowEngine:
             except asyncio.TimeoutError:
                 last_error = f"Timeout after {step.timeout_s}s"
             except Exception as e:
+                import traceback as _tb
                 last_error = str(e)
+                print(f"[WorkflowEngine] step '{step.name}' attempt {attempt+1} error: {e}")
+                _tb.print_exc()
 
             if attempt < step.max_retries:
                 await self._emit("step.retrying", {"step": step.name, "attempt": attempt + 1, "error": last_error})
@@ -278,7 +284,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
     # ── STEP IMPLEMENTATIONS ──────────────────────────────
 
     async def step_extract_po(ctx: WorkflowContext) -> StepResult:
-        from main import POExtractionAgent, DocumentIntelligenceEngine
+        from services.api.main import POExtractionAgent, DocumentIntelligenceEngine
         import uuid as _uuid
 
         agent    = POExtractionAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -318,7 +324,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         ctx.extracted_po = {}
 
     async def step_validate_hs(ctx: WorkflowContext) -> StepResult:
-        from main import HSCodeValidationAgent
+        from services.api.main import HSCodeValidationAgent
         import uuid as _uuid
 
         agent = HSCodeValidationAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -343,7 +349,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         return StepResult(status=StepStatus.COMPLETED, output=hs_data, confidence=confidence)
 
     async def step_generate_documents(ctx: WorkflowContext) -> StepResult:
-        from main import DocumentGenerationAgent
+        from services.api.main import DocumentGenerationAgent
         import uuid as _uuid
 
         agent     = DocumentGenerationAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -365,7 +371,10 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             "packing_list":       packing_r["doc_data"],
         }
 
-        doc_confidence = min(invoice_r.get("confidence", 95), packing_r.get("confidence", 95))
+        doc_confidence = min(
+            float(invoice_r.get("confidence") or 95),
+            float(packing_r.get("confidence") or 95),
+        )
         ctx.overall_confidence = min(ctx.overall_confidence, doc_confidence)
 
         return StepResult(status=StepStatus.COMPLETED, output=ctx.documents, confidence=ctx.overall_confidence)
@@ -375,7 +384,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         ctx.documents = {}
 
     async def step_hitl_decision(ctx: WorkflowContext) -> StepResult:
-        from main import HITLOrchestrator
+        from services.api.main import HITLOrchestrator
         import uuid as _uuid
 
         decision = HITLOrchestrator.evaluate(
@@ -396,7 +405,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         return StepResult(status=StepStatus.COMPLETED, output=decision, confidence=ctx.overall_confidence)
 
     async def step_send_notifications(ctx: WorkflowContext) -> StepResult:
-        from main import WhatsAppService
+        from services.api.main import WhatsAppService
 
         buyer_wa = ctx.raw_input.get("buyer_whatsapp")
         invoice  = ctx.documents.get("commercial_invoice", {})
