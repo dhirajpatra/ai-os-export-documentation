@@ -16,6 +16,8 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any
+from dotenv import load_dotenv
+load_dotenv()
 
 import httpx
 from fastapi import (
@@ -66,13 +68,13 @@ class Settings:
     TWILIO_PHONE_NUMBER = ""
 
     # Auth
-    JWT_SECRET      = ""  # from env
-    JWT_EXPIRE_MINS = 60 * 8
+    JWT_SECRET      = os.getenv("JWT_SECRET")
+    JWT_EXPIRE_MINS = os.getenv("JWT_EXPIRE_MINS", "480")
 
     # HITL
-    CONFIDENCE_THRESHOLD_AUTO   = 92.0   # above this → auto-approve
-    CONFIDENCE_THRESHOLD_HUMAN  = 70.0   # below this → mandatory human review
-    APPROVAL_TIMEOUT_HOURS      = 4
+    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO", "70.0"))   # above this → auto-approve
+    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "65.0"))   # below this → mandatory human review
+    APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "4"))
 
 
 cfg = Settings()
@@ -1518,6 +1520,28 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
     # If awaiting human, approval_requests table was written.
     # Emit to Kafka for downstream consumers.
     print(f"[WA workflow] status={result['status']} confidence={result['overall_confidence']}")
+
+    # Always send acknowledgement back to sender
+    sender = msg.get("from")
+    if sender:
+        if result["status"] == "awaiting_approval":
+            hitl = result.get("hitl_decision", {})
+            approval_id = result.get("approval_id", "N/A")
+            await WhatsAppService.send_text(
+                to=sender,
+                body=(
+                    f"✅ *PO Received & Processed!*\n\n"
+                    f"📦 Items: {len(result.get('extracted_order', {}).get('items', []))}\n"
+                    f"🎯 Confidence: {result['overall_confidence']}%\n"
+                    f"📋 Status: Under Review\n"
+                    f"🔍 Reason: {hitl.get('reason', '')}\n\n"
+                    f"⏳ Our team is reviewing your order. "
+                    f"You'll receive the documents shortly.\n"
+                    f"Reference ID: `{approval_id}`"
+                )
+            )
+        elif result["status"] == "completed":
+            pass  # already sent by workflow.execute()
 
 
 # ── HITL APPROVALS ───────────────────────────
