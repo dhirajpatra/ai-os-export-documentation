@@ -1,0 +1,3 @@
+[submodule "ai-os-export-documentation"]
+	path = ai-os-export-documentation
+	url = https://github.com/dhirajpatra/ai-os-export-documentation
