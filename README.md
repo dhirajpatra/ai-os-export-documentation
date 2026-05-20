@@ -117,6 +117,9 @@ cp .env.example .env
 # Fill in: JWT_SECRET and either Twilio or Meta WhatsApp credentials.
 ```
 
+The API container loads runtime configuration directly from `.env` via
+`docker-compose.yml`, and `Dockerfile.api` includes `.env` in the image build.
+
 For the MVP Twilio WhatsApp path, keep:
 ```bash
 WHATSAPP_PROVIDER=twilio
@@ -127,6 +130,17 @@ TWILIO_PHONE_NUMBER=whatsapp:+14155238886
 
 The direct Meta WhatsApp option remains available with `WHATSAPP_PROVIDER=meta`
 and `WHATSAPP_TOKEN` / `WHATSAPP_PHONE_ID`.
+
+For the current Meta business portfolio:
+```bash
+META_BUSINESS_NAME="AI Agentic OS For Trade"
+META_BUSINESS_PORTFOLIO_ID="2841939439484082"
+FACEBOOK_BUSINESS_ID="2841939439484082"
+```
+
+Keep `WHATSAPP_PHONE_ID` and `WHATSAPP_BUSINESS_ID` from the WhatsApp
+Cloud API screen. The business portfolio ID is different from the phone
+number ID.
 
 ### 2. Start the stack
 ```bash

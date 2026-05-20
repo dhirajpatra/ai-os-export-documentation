@@ -8,8 +8,10 @@ All agents are modular and LLM-provider-agnostic.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -21,7 +23,7 @@ from fastapi import (
     Request, UploadFile, WebSocket, WebSocketDisconnect, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 
@@ -105,6 +107,252 @@ def parse_llm_json(text: str, context: str) -> Any:
             raise ValueError(f"{context}: LLM response contained incomplete JSON: {cleaned[:200]}")
 
         return json.loads(cleaned[start:end + 1])
+
+
+def render_readme_html() -> str:
+    readme_path = os.path.join(os.path.dirname(__file__), "README.md")
+    with open(readme_path, "r", encoding="utf-8") as readme_file:
+        markdown = readme_file.read()
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(cfg.APP_NAME)} README</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #5f6b7a;
+      --line: #d9e0ea;
+      --accent: #1266d6;
+      --code: #101828;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.62 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    main {{
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 42px 22px 64px;
+    }}
+    article {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: clamp(24px, 5vw, 52px);
+      box-shadow: 0 18px 50px rgba(23, 32, 42, 0.08);
+    }}
+    h1, h2, h3, h4 {{ line-height: 1.18; margin: 1.45em 0 0.55em; }}
+    h1 {{ margin-top: 0; font-size: clamp(2.2rem, 7vw, 4.2rem); color: #111827; }}
+    h2 {{ border-top: 1px solid var(--line); padding-top: 1.2em; font-size: 1.75rem; }}
+    h3 {{ font-size: 1.24rem; color: #263445; }}
+    p {{ margin: 0.8em 0; }}
+    a {{ color: var(--accent); text-decoration-thickness: 0.08em; text-underline-offset: 0.18em; }}
+    blockquote {{
+      margin: 1.2em 0;
+      padding: 0.2em 0 0.2em 1.1em;
+      border-left: 4px solid var(--accent);
+      color: var(--muted);
+      font-size: 1.08rem;
+    }}
+    hr {{ border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }}
+    pre {{
+      overflow-x: auto;
+      padding: 16px 18px;
+      border-radius: 8px;
+      background: var(--code);
+      color: #f8fafc;
+      line-height: 1.45;
+    }}
+    code {{
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }}
+    :not(pre) > code {{
+      background: #eef3f8;
+      color: #243042;
+      padding: 0.16em 0.38em;
+      border-radius: 5px;
+    }}
+    ul, ol {{ padding-left: 1.35rem; }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.2em 0;
+      display: block;
+      overflow-x: auto;
+    }}
+    th, td {{
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      min-width: 140px;
+    }}
+    th {{ background: #eef3f8; text-align: left; }}
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      {_markdown_to_html(markdown)}
+    </article>
+  </main>
+</body>
+</html>"""
+
+
+def _markdown_to_html(markdown: str) -> str:
+    lines = markdown.splitlines()
+    output: list[str] = []
+    paragraph: list[str] = []
+    list_type: str | None = None
+    in_code = False
+    code_lines: list[str] = []
+    i = 0
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            output.append(f"<p>{_inline_markdown(' '.join(paragraph))}</p>")
+            paragraph = []
+
+    def close_list() -> None:
+        nonlocal list_type
+        if list_type:
+            output.append(f"</{list_type}>")
+            list_type = None
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            close_list()
+            if in_code:
+                output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                in_code = False
+            else:
+                in_code = True
+            i += 1
+            continue
+
+        if in_code:
+            code_lines.append(line)
+            i += 1
+            continue
+
+        if not stripped:
+            flush_paragraph()
+            close_list()
+            i += 1
+            continue
+
+        if stripped == "---":
+            flush_paragraph()
+            close_list()
+            output.append("<hr>")
+            i += 1
+            continue
+
+        table_lines: list[str] = []
+        while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+            table_lines.append(lines[i].strip())
+            i += 1
+        if table_lines:
+            flush_paragraph()
+            close_list()
+            output.append(_render_table(table_lines))
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading:
+            flush_paragraph()
+            close_list()
+            level = len(heading.group(1))
+            output.append(f"<h{level}>{_inline_markdown(heading.group(2))}</h{level}>")
+            i += 1
+            continue
+
+        quote = re.match(r"^>\s?(.*)$", stripped)
+        if quote:
+            flush_paragraph()
+            close_list()
+            output.append(f"<blockquote>{_inline_markdown(quote.group(1))}</blockquote>")
+            i += 1
+            continue
+
+        unordered = re.match(r"^[-*]\s+(.+)$", stripped)
+        ordered = re.match(r"^\d+\.\s+(.+)$", stripped)
+        if unordered or ordered:
+            flush_paragraph()
+            tag = "ul" if unordered else "ol"
+            if list_type != tag:
+                close_list()
+                output.append(f"<{tag}>")
+                list_type = tag
+            item = (unordered or ordered).group(1)
+            output.append(f"<li>{_inline_markdown(item)}</li>")
+            i += 1
+            continue
+
+        close_list()
+        paragraph.append(stripped)
+        i += 1
+
+    flush_paragraph()
+    close_list()
+    if in_code:
+        output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+    return "\n".join(output)
+
+
+def _render_table(lines: list[str]) -> str:
+    rows = [[cell.strip() for cell in line.strip("|").split("|")] for line in lines]
+    if len(rows) > 1 and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in rows[1]):
+        header = rows[0]
+        body = rows[2:]
+    else:
+        header = []
+        body = rows
+
+    parts = ["<table>"]
+    if header:
+        parts.append("<thead><tr>")
+        parts.extend(f"<th>{_inline_markdown(cell)}</th>" for cell in header)
+        parts.append("</tr></thead>")
+    parts.append("<tbody>")
+    for row in body:
+        parts.append("<tr>")
+        parts.extend(f"<td>{_inline_markdown(cell)}</td>" for cell in row)
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _inline_markdown(text: str) -> str:
+    escaped = html.escape(text)
+    code_spans: list[str] = []
+
+    def save_code(match: re.Match) -> str:
+        code_spans.append(f"<code>{match.group(1)}</code>")
+        return f"@@CODE{len(code_spans) - 1}@@"
+
+    escaped = re.sub(r"`([^`]+)`", save_code, escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', escaped)
+    for idx, code in enumerate(code_spans):
+        escaped = escaped.replace(f"@@CODE{idx}@@", code)
+    return escaped
 
 
 # ─────────────────────────────────────────────
@@ -1155,6 +1403,12 @@ async def get_org_context(request: Request) -> OrgContext:
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": cfg.VERSION, "service": cfg.APP_NAME}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def readme_home():
+    """Render README.md as a formatted HTML page."""
+    return HTMLResponse(render_readme_html())
 
 
 # ── KILLER DEMO: Full workflow ────────────────
