@@ -37,44 +37,52 @@ class Settings:
     APP_NAME = "TradeOS API"
     VERSION  = "0.1.0"
 
-    # Database
-    DATABASE_URL = "postgresql+asyncpg://tradeos:secret@localhost/tradeos"
+    # Database — read from env (falls back to local dev default)
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL",
+        f"postgresql+asyncpg://{os.getenv('POSTGRES_USER','tradeos')}:{os.getenv('POSTGRES_PASSWORD','tradeos')}@{os.getenv('POSTGRES_HOST','localhost')}:{os.getenv('POSTGRES_PORT','5432')}/{os.getenv('POSTGRES_DB','tradeos')}",
+    )
 
     # LLM Provider chain (tried in order, with fallback)
+    # Priority 1→6: OpenAI → Groq → xAI Grok → Anthropic → Gemini → Local Ollama
     LLM_CHAIN = [
         {"provider": "openai",    "model": "gpt-4o",                  "priority": 1},
         {"provider": "groq",      "model": "llama-3.3-70b-versatile", "priority": 2},
-        {"provider": "grok",      "model": "llama-3.3-70b-versatile",                "priority": 3},
+        {"provider": "grok",      "model": "grok-3",                  "priority": 3},
         {"provider": "anthropic", "model": "claude-opus-4-6",         "priority": 4},
         {"provider": "gemini",    "model": "gemini-2.0-flash",        "priority": 5},
         {"provider": "local",     "model": "mistral-7b-q4",           "priority": 6},
     ]
 
     # Workflow
-    TEMPORAL_HOST   = "localhost:7233"
-    KAFKA_BOOTSTRAP = "localhost:9092"
+    TEMPORAL_HOST   = os.getenv("TEMPORAL_HOST",   "localhost:7233")
+    KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 
     # Storage
-    S3_BUCKET = "tradeos-documents"
+    S3_BUCKET = os.getenv("S3_BUCKET", "tradeos-documents")
 
-    # WhatsApp
-    WHATSAPP_PROVIDER   = "meta"  # meta | twilio
-    WHATSAPP_API_URL    = "https://graph.facebook.com/v18.0"
-    WHATSAPP_TOKEN      = ""  # from env
-    WHATSAPP_PHONE_ID   = ""  # from env
-    WHATSAPP_VERIFY_TOKEN = ""
-    TWILIO_ACCOUNT_SID  = ""
-    TWILIO_AUTH_TOKEN   = ""
-    TWILIO_PHONE_NUMBER = ""
+    # WhatsApp — all values from env
+    WHATSAPP_PROVIDER     = os.getenv("WHATSAPP_PROVIDER",     "meta")  # meta | twilio
+    WHATSAPP_API_URL      = os.getenv("WHATSAPP_API_URL",      "https://graph.facebook.com/v18.0")
+    WHATSAPP_TOKEN        = os.getenv("WHATSAPP_TOKEN",        "")
+    WHATSAPP_PHONE_ID     = os.getenv("WHATSAPP_PHONE_ID",     "")
+    WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
+    WHATSAPP_BUSINESS_ID  = os.getenv("WHATSAPP_BUSINESS_ID",  "")
+    TWILIO_ACCOUNT_SID    = os.getenv("TWILIO_ACCOUNT_SID",    "")
+    TWILIO_AUTH_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN",     "")
+    TWILIO_PHONE_NUMBER   = os.getenv("TWILIO_PHONE_NUMBER",   "")
 
     # Auth
     JWT_SECRET      = os.getenv("JWT_SECRET")
     JWT_EXPIRE_MINS = os.getenv("JWT_EXPIRE_MINS", "480")
 
-    # HITL
-    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO", "70.0"))   # above this → auto-approve
-    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "65.0"))   # below this → mandatory human review
-    APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS", "4"))
+    # HITL — thresholds aligned with architecture spec:
+    #   >=92% + no high flags → auto-approve
+    #   70-91%                → soft review (optional 30-second check)
+    #   <70%  OR critical flag → mandatory human review
+    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "92.0"))
+    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "70.0"))
+    APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS",     "4"))
 
 
 cfg = Settings()
@@ -112,10 +120,6 @@ def parse_llm_json(text: str, context: str) -> Any:
 
 
 def render_readme_html() -> str:
-    readme_path = os.path.join(os.path.dirname(__file__), "README.md")
-    with open(readme_path, "r", encoding="utf-8") as readme_file:
-        markdown = readme_file.read()
-
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -212,6 +216,7 @@ def render_readme_html() -> str:
   </main>
 </body>
 </html>"""
+
 
 # ─────────────────────────────────────────────
 # PYDANTIC MODELS
@@ -648,6 +653,14 @@ Flag ambiguous fields as warnings, do not hallucinate.
         source   = input_data["source"]       # "whatsapp" | "email" | "file"
         raw_text = input_data.get("raw_text", "")
 
+        # Pull versioned system prompt from registry; fall back to inline if missing
+        try:
+            from core.prompt_registry import PromptRegistry
+            prompt_rec  = PromptRegistry.get("po_extraction_agent", "extract_purchase_order")
+            system_prompt = prompt_rec.system_prompt
+        except Exception:
+            system_prompt = self.SYSTEM_PROMPT
+
         # Recall: does this buyer have patterns we've seen before?
         buyer_memories = []
         if input_data.get("buyer_contact_id"):
@@ -661,7 +674,7 @@ Flag ambiguous fields as warnings, do not hallucinate.
         )
 
         result = await self.llm.complete(
-            system_prompt=self.SYSTEM_PROMPT + memory_context,
+            system_prompt=system_prompt + memory_context,
             user_prompt=f"Source: {source}\n\nContent:\n{raw_text}",
             output_schema={
                 "buyer_name": "string",
@@ -721,6 +734,14 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
         from_country     = input_data.get("from_country", "IN")
         to_country       = input_data.get("to_country", "AE")
 
+        # Pull versioned system prompt from registry; fall back to inline if missing
+        try:
+            from core.prompt_registry import PromptRegistry
+            prompt_rec    = PromptRegistry.get("hs_validation_agent", "validate_hs_codes")
+            system_prompt = prompt_rec.system_prompt
+        except Exception:
+            system_prompt = self.SYSTEM_PROMPT
+
         # Recall previously validated HS codes for this org
         cached_codes = await self._recall(
             query=" ".join(i.get("description", "") for i in items),
@@ -728,7 +749,7 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
         )
 
         result = await self.llm.complete(
-            system_prompt=self.SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=(
                 f"Validate these items for export from {from_country} to {to_country}:\n"
                 f"{json.dumps(items, indent=2)}\n"
@@ -776,6 +797,12 @@ class DocumentGenerationAgent(BaseAgent):
         order     = input_data["order"]
         overrides = input_data.get("overrides", {})
 
+        # Pull versioned system prompt from registry for this doc type
+        _prompt_key_map = {
+            "commercial_invoice": "generate_commercial_invoice",
+            "packing_list":       "generate_packing_list",
+        }
+
         # Recall: does this buyer have a preferred invoice format?
         style_memory = await self._recall(
             query="invoice format preference",
@@ -802,13 +829,18 @@ class DocumentGenerationAgent(BaseAgent):
         }
 
     async def _gen_commercial_invoice(self, order: dict, overrides: dict, style: list) -> dict:
-        result = await self.llm.complete(
-            system_prompt=(
+        try:
+            from core.prompt_registry import PromptRegistry
+            system_prompt = PromptRegistry.get("doc_generation_agent", "generate_commercial_invoice").system_prompt
+        except Exception:
+            system_prompt = (
                 "Generate a complete commercial invoice for international export. "
                 "Follow UNCTAD/ICC standards. Include all mandatory fields for LC documentation. "
                 "Apply Indian GST zero-rating for exports (LUT). "
                 "Format amounts correctly for the destination country."
-            ),
+            )
+        result = await self.llm.complete(
+            system_prompt=system_prompt,
             user_prompt=(
                 f"Generate commercial invoice for:\n{json.dumps(order, indent=2)}"
                 f"\nOverrides: {json.dumps(overrides)}"
@@ -836,8 +868,13 @@ class DocumentGenerationAgent(BaseAgent):
         return parse_llm_json(result["text"], "commercial invoice generation")
 
     async def _gen_packing_list(self, order: dict, overrides: dict, style: list) -> dict:
+        try:
+            from core.prompt_registry import PromptRegistry
+            system_prompt = PromptRegistry.get("doc_generation_agent", "generate_packing_list").system_prompt
+        except Exception:
+            system_prompt = "Generate a detailed packing list for international export."
         result = await self.llm.complete(
-            system_prompt="Generate a detailed packing list for international export.",
+            system_prompt=system_prompt,
             user_prompt=f"Order data:\n{json.dumps(order, indent=2)}",
             output_schema={
                 "pl_number": "string",
@@ -1022,13 +1059,20 @@ class WhatsAppService:
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 for msg in value.get("messages", []):
+                    msg_type = msg.get("type")
+                    # Extract document metadata (media_id) when present
+                    doc      = msg.get("document", {})
                     messages.append({
                         "from":      msg.get("from"),
                         "wa_msg_id": msg.get("id"),
-                        "type":      msg.get("type"),
+                        "type":      msg_type,
                         "text":      msg.get("text", {}).get("body", ""),
                         "timestamp": msg.get("timestamp"),
                         "contact":   value.get("contacts", [{}])[0],
+                        # document fields — present only for document messages
+                        "media_id":  doc.get("id"),
+                        "mime_type": doc.get("mime_type", "application/pdf"),
+                        "filename":  doc.get("filename"),
                     })
         return messages
 
@@ -1073,6 +1117,29 @@ class WhatsAppService:
         if not value:
             raise RuntimeError(f"{name} is required for Twilio WhatsApp")
         return value
+
+    @staticmethod
+    async def download_media(media_id: str) -> bytes:
+        """Download a media file from Meta WhatsApp Cloud API using its media_id."""
+        token = os.getenv("WHATSAPP_TOKEN", cfg.WHATSAPP_TOKEN)
+
+        # Step 1: Resolve the temporary download URL
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{cfg.WHATSAPP_API_URL}/{media_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            download_url = resp.json()["url"]
+
+        # Step 2: Fetch the actual binary content
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.get(
+                download_url,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            return resp.content
 
 
 # ─────────────────────────────────────────────
@@ -1285,7 +1352,12 @@ async def run_killer_demo(
     Feed it a PO (text or PDF) and it runs the full pipeline:
     Extract → HS Validate → Generate Invoice + Packing List
     → HITL decision → Send WhatsApp/Email → Return full result.
+
+    Uses the deterministic WorkflowEngine (saga pattern) — LLMs are
+    tools called within steps, not orchestrators.
     """
+    from core.workflow_engine import build_po_to_dispatch_workflow
+
     file_bytes = await file.read() if file else None
     if not file_bytes and not (po_text or "").strip():
         raise HTTPException(
@@ -1293,15 +1365,31 @@ async def run_killer_demo(
             detail="Send either po_text as a form field or upload a file.",
         )
 
-    workflow = KillerDemoWorkflow(org_id=ctx.org_id)
+    raw_input = {
+        "raw_text":       po_text or "",
+        "buyer_whatsapp": buyer_whatsapp,
+        "buyer_email":    buyer_email,
+    }
+    if file_bytes:
+        raw_input["file_bytes"] = file_bytes
+        raw_input["mime_type"]  = file.content_type if file else "application/pdf"
+
+    source = "file" if file_bytes else "whatsapp" if buyer_whatsapp else "portal"
+
+    engine, wf_ctx = build_po_to_dispatch_workflow(
+        org_id=str(ctx.org_id),
+        source=source,
+        raw_input=raw_input,
+    )
+
+    # Stream step events to WebSocket clients via the audit log
+    async def ws_hook(event: dict):
+        pass  # In production: push to Kafka topic for workflow_id
+
+    engine.on_event(ws_hook)
+
     try:
-        result = await workflow.execute(
-            source="whatsapp" if not file else "file",
-            raw_text=po_text,
-            file_bytes=file_bytes,
-            buyer_whatsapp=buyer_whatsapp,
-            buyer_email=buyer_email,
-        )
+        result = await engine.run()
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1360,44 +1448,76 @@ async def twilio_whatsapp_inbound(
 
 
 async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
-    """Background task: process inbound WhatsApp → extract PO → run workflow."""
-    text = msg.get("text", "")
-    if not text:
-        return
+    """
+    Background task: process inbound WhatsApp message → run deterministic workflow.
+    Handles two message types:
+      - text:     PO sent as plain WhatsApp text
+      - document: PO sent as a PDF attachment (downloaded from Meta)
+    """
+    from core.workflow_engine import build_po_to_dispatch_workflow
 
-    workflow = KillerDemoWorkflow(org_id=org_id)
-    result   = await workflow.execute(
-        source="whatsapp",
-        raw_text=text,
-        buyer_whatsapp=msg.get("from"),
+    msg_type = msg.get("type")
+    text     = msg.get("text", "")
+    sender   = msg.get("from")
+    file_bytes: bytes | None = None
+    mime_type  = "application/pdf"
+
+    # ── Route by message type ──────────────────────────────
+    if msg_type == "document":
+        media_id = msg.get("media_id")
+        if not media_id:
+            return  # malformed payload — skip
+        # Acknowledge receipt immediately so buyer isn't left waiting
+        await WhatsAppService.send_text(
+            to=sender,
+            body="📄 PDF received! Processing your purchase order...",
+        )
+        file_bytes = await WhatsAppService.download_media(media_id)
+        mime_type  = msg.get("mime_type", "application/pdf")
+
+    elif msg_type == "text":
+        if not text.strip():
+            return  # empty message — ignore
+
+    else:
+        return  # audio, image, sticker, etc. — ignore
+
+    # ── Build and run deterministic WorkflowEngine ─────────
+    raw_input = {
+        "raw_text":       text,
+        "buyer_whatsapp": sender,
+    }
+    if file_bytes:
+        raw_input["file_bytes"] = file_bytes
+        raw_input["mime_type"]  = mime_type
+
+    source = "file" if file_bytes else "whatsapp"
+
+    engine, _ = build_po_to_dispatch_workflow(
+        org_id=str(org_id),
+        source=source,
+        raw_input=raw_input,
     )
+    result = await engine.run()
 
-    # If auto-approved, docs already sent.
-    # If awaiting human, approval_requests table was written.
-    # Emit to Kafka for downstream consumers.
-    print(f"[WA workflow] status={result['status']} confidence={result['overall_confidence']}")
+    print(f"[WA workflow] status={result['status']} confidence={result.get('overall_confidence')}")
 
-    # Always send acknowledgement back to sender
-    sender = msg.get("from")
-    if sender:
-        if result["status"] == "awaiting_approval":
-            hitl = result.get("hitl_decision", {})
-            approval_id = result.get("approval_id", "N/A")
-            await WhatsAppService.send_text(
-                to=sender,
-                body=(
-                    f"✅ *PO Received & Processed!*\n\n"
-                    f"📦 Items: {len(result.get('extracted_order', {}).get('items', []))}\n"
-                    f"🎯 Confidence: {result['overall_confidence']}%\n"
-                    f"📋 Status: Under Review\n"
-                    f"🔍 Reason: {hitl.get('reason', '')}\n\n"
-                    f"⏳ Our team is reviewing your order. "
-                    f"You'll receive the documents shortly.\n"
-                    f"Reference ID: `{approval_id}`"
-                )
-            )
-        elif result["status"] == "completed":
-            pass  # already sent by workflow.execute()
+    # ── Notify sender of review status ────────────────────
+    if sender and result["status"] == "awaiting_human":
+        approval_id = result.get("approval_id", "N/A")
+        await WhatsAppService.send_text(
+            to=sender,
+            body=(
+                f"✅ *PO Received & Processed!*\n\n"
+                f"🎯 Confidence: {result.get('overall_confidence', 0):.0f}%\n"
+                f"📋 Status: Under Review\n\n"
+                f"⏳ Our team is reviewing your order. "
+                f"You'll receive the documents shortly.\n"
+                f"Reference ID: `{approval_id}`"
+            ),
+        )
+    # If status == 'completed', the workflow's send_notifications step
+    # already sent the confirmation message to the buyer.
 
 
 # ── HITL APPROVALS ───────────────────────────

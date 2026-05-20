@@ -74,10 +74,9 @@ WhatsApp PO / PDF Upload
           │
           ▼
 ┌─────────────────────┐
-│  HITL Orchestrator  │  ← confidence ≥ 92% + no high flags → AUTO APPROVE
-│                     │    confidence 70–92% → soft review (30-second check)
-│                     │    confidence < 70% or critical flag → BLOCK + notify
-│                     │    Diff viewer, audit log, rollback on reject
+│  HITL Orchestrator  │  ← confidence ≥ 75% + no high flags → AUTO APPROVE
+│                     │    confidence 65%–74% → soft review (1-minute check)
+│                     │    confidence < 65% or critical flag → BLOCK + notify
 └─────────┬───────────┘
           │
     ┌─────┴─────┐
