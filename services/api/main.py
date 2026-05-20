@@ -1203,10 +1203,10 @@ class KillerDemoWorkflow:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup
+    # ── Startup ────────────────────────────────────────────
     print("🚀 TradeOS API starting — connecting to DB, Kafka, Temporal…")
 
-    # ── Dependency checks ──────────────────────────────────
+    # pypdf check
     try:
         from pypdf import PdfReader  # noqa: F401
         print("✅ pypdf available — text-layer PDF extraction enabled")
@@ -1214,8 +1214,22 @@ async def lifespan(app: FastAPI):
         print("⚠️  pypdf NOT installed. PDF text extraction will fall back to PaddleOCR.")
         print("   Fix: add 'pypdf' to requirements.txt and rebuild the image.")
 
+    # DB pool
+    try:
+        from core.db import init_pool
+        await init_pool()
+    except Exception as exc:
+        print(f"⚠️  DB pool failed to initialise: {exc}")
+        print("   Approval/shipment persistence will be unavailable this session.")
+
     yield
-    # shutdown
+
+    # ── Shutdown ───────────────────────────────────────────
+    try:
+        from core.db import close_pool
+        await close_pool()
+    except Exception:
+        pass
     print("🛑 TradeOS API shutting down…")
 
 
@@ -1507,10 +1521,43 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
 # ── HITL APPROVALS ───────────────────────────
 
 @app.get("/api/v1/approvals")
-async def list_approvals(ctx: OrgContext = Depends(get_org_context)):
-    """Fetch all pending approval requests for this org."""
-    # In production: query approval_requests WHERE org_id=ctx.org_id AND status='pending'
-    return {"approvals": [], "total": 0}
+async def list_approvals(
+    status_filter: str = "pending",
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """Fetch approval requests for this org, filtered by status (default: pending)."""
+    try:
+        from core.db import get_pool
+        pool = get_pool()
+        async with pool.acquire() as db:
+            rows = await db.fetch(
+                """
+                SELECT
+                    id, workflow_id, order_id, requested_by,
+                    title, description, ai_confidence, risk_flags,
+                    suggested_action, diff_after,
+                    status, assigned_to, expires_at, created_at
+                FROM approval_requests
+                WHERE org_id = $1
+                  AND status = $2
+                ORDER BY created_at DESC
+                LIMIT 100
+                """,
+                ctx.org_id,
+                status_filter,
+            )
+            approvals = [dict(r) for r in rows]
+            # Serialise non-JSON-native types
+            for a in approvals:
+                for k, v in a.items():
+                    if hasattr(v, "isoformat"):
+                        a[k] = v.isoformat()
+                    elif hasattr(v, "__str__") and not isinstance(v, (str, int, float, bool, type(None))):
+                        a[k] = str(v)
+        return {"approvals": approvals, "total": len(approvals)}
+    except RuntimeError:
+        # Pool not available (DB offline during startup)
+        return {"approvals": [], "total": 0, "warning": "DB unavailable"}
 
 
 @app.post("/api/v1/approvals/{approval_id}/action")
@@ -1520,23 +1567,112 @@ async def action_approval(
     ctx: OrgContext = Depends(get_org_context),
 ):
     """
-    Human approves / rejects / requests changes.
-    Resumes the paused Temporal workflow.
-    Writes full audit trail.
+    Human approves / rejects / requests changes on a paused workflow.
+
+    Steps:
+      1. Fetch approval_request — 404 if not found or wrong org
+      2. Guard: must be in 'pending' status
+      3. Write audit_log entry
+      4. Update approval_request status + reviewed_by/at/note
+      5. Resume the live WorkflowEngine (or mark cancelled)
     """
-    # 1. Fetch approval_request
-    # 2. Validate user has permission (RBAC)
-    # 3. Write audit_log entry
-    # 4. Update approval status
-    # 5. Signal Temporal workflow to resume
-    # 6. If approved + field_overrides: regenerate affected docs
+    from core.db import get_pool
+    from core.workflow_engine import get_engine
+
+    pool = get_pool()
+    async with pool.acquire() as db:
+
+        # 1 — Fetch
+        row = await db.fetchrow(
+            """
+            SELECT id, workflow_id, order_id, status, org_id
+            FROM approval_requests
+            WHERE id = $1 AND org_id = $2
+            """,
+            approval_id,
+            ctx.org_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+        if row["status"] != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Approval is already '{row['status']}' — cannot act again",
+            )
+
+        # 2 — Map action → DB status
+        new_status = {
+            "approve":          "approved",
+            "reject":           "rejected",
+            "request_changes":  "pending",   # stays pending; new diff_after stored
+        }[body.action]
+
+        # 3 — Audit log
+        audit_id = uuid.uuid4()
+        await db.execute(
+            """
+            INSERT INTO audit_log (
+                org_id, actor_type, actor_id, action,
+                entity_type, entity_id,
+                old_value, new_value, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
+            ctx.org_id,
+            "user",
+            str(ctx.user_id),
+            f"approval.{body.action}",
+            "approval_request",
+            str(approval_id),
+            json.dumps({"status": "pending"}),
+            json.dumps({"status": new_status, "note": body.note}),
+            json.dumps({"field_overrides": body.field_overrides}),
+        )
+
+        # 4 — Update approval_request
+        await db.execute(
+            """
+            UPDATE approval_requests
+            SET status      = $1,
+                reviewed_by = $2,
+                reviewed_at = NOW(),
+                review_note = $3,
+                diff_after  = COALESCE($4::jsonb, diff_after)
+            WHERE id = $5
+            """,
+            new_status,
+            ctx.user_id,
+            body.note,
+            json.dumps(body.field_overrides) if body.field_overrides else None,
+            approval_id,
+        )
+
+        # 5 — Resume live engine
+        workflow_id = str(row["workflow_id"])
+        engine = get_engine(workflow_id)
+
+        resumed_result: dict | None = None
+        if engine:
+            try:
+                resumed_result = await engine.resume_from_approval(
+                    approval_action=body.action,
+                    overrides=body.field_overrides or None,
+                )
+                print(f"[Approval] workflow {workflow_id} resumed → {resumed_result.get('status')}")
+            except Exception as exc:
+                print(f"[Approval] resume failed for workflow {workflow_id}: {exc}")
+                # Not fatal — approval is persisted; engine may have been recycled
+        else:
+            print(f"[Approval] no live engine for workflow {workflow_id} — persisted only")
 
     return {
-        "approval_id": str(approval_id),
-        "action":      body.action,
-        "status":      "ok",
-        "message":     f"Workflow {'resumed' if body.action == 'approve' else 'rejected'}.",
-        "audit_id":    str(uuid.uuid4()),
+        "approval_id":    str(approval_id),
+        "action":         body.action,
+        "new_status":     new_status,
+        "workflow_id":    workflow_id,
+        "resumed_status": resumed_result.get("status") if resumed_result else "engine_not_found",
+        "audit_id":       str(audit_id),
+        "message":        f"Approval {body.action}d and workflow updated.",
     }
 
 

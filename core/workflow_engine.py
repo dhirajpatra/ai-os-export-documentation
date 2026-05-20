@@ -17,6 +17,25 @@ from typing import Any, Callable, Awaitable
 
 
 # ─────────────────────────────────────────────
+# LIVE ENGINE REGISTRY
+# Keeps engines alive while awaiting human input
+# so resume_from_approval() can reach them.
+# Key: workflow_id (str)  Value: WorkflowEngine
+# ─────────────────────────────────────────────
+
+_live_engines: dict[str, "WorkflowEngine"] = {}
+
+def register_engine(engine: "WorkflowEngine"):
+    _live_engines[engine.ctx.workflow_id] = engine
+
+def get_engine(workflow_id: str) -> "WorkflowEngine | None":
+    return _live_engines.get(workflow_id)
+
+def deregister_engine(workflow_id: str):
+    _live_engines.pop(workflow_id, None)
+
+
+# ─────────────────────────────────────────────
 # STATE DEFINITIONS
 # ─────────────────────────────────────────────
 
@@ -135,6 +154,7 @@ class WorkflowEngine:
 
     async def run(self) -> dict:
         self.status = WorkflowStatus.RUNNING
+        register_engine(self)
         await self._emit("workflow.started", {"org_id": self.ctx.org_id})
 
         for step_name in self.step_order:
@@ -175,6 +195,7 @@ class WorkflowEngine:
                 self._completed_steps.append(step_name)
 
         self.status = WorkflowStatus.COMPLETED
+        deregister_engine(self.ctx.workflow_id)
         await self._emit("workflow.completed", {"steps_completed": len(self._completed_steps)})
         return self._snapshot("completed")
 
@@ -385,57 +406,236 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
 
     async def step_hitl_decision(ctx: WorkflowContext) -> StepResult:
         from services.api.main import HITLOrchestrator
+        from core.db import get_pool, SEED_USER_ID
         import uuid as _uuid
+        import json as _json
+        from datetime import timezone, timedelta
 
         decision = HITLOrchestrator.evaluate(
             "doc_generation", ctx.overall_confidence, ctx.risk_flags
         )
 
-        if decision["requires_human"]:
-            ctx.approval_id = str(_uuid.uuid4())
-            # In production: INSERT into approval_requests, notify assigned user
-            return StepResult(
-                status=StepStatus.COMPLETED,
-                output=decision,
-                confidence=ctx.overall_confidence,
-                requires_human=True,
-                human_reason=decision["reason"],
+        # ── Persist workflow + order + approval_request to DB ────────────
+        pool = get_pool()
+        async with pool.acquire() as db:
+
+            # 1 — Insert into workflows
+            wf_row = await db.fetchrow(
+                """
+                INSERT INTO workflows (
+                    id, org_id, name, status, current_step,
+                    state_snapshot, context
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (id) DO UPDATE
+                    SET status = EXCLUDED.status,
+                        current_step = EXCLUDED.current_step
+                RETURNING id
+                """,
+                _uuid.UUID(ctx.workflow_id),
+                _uuid.UUID(ctx.org_id),
+                "po_to_dispatch",
+                "awaiting_human" if decision["requires_human"] else "running",
+                "hitl_decision",
+                _json.dumps({}),
+                _json.dumps({
+                    "source": ctx.source,
+                    "overall_confidence": ctx.overall_confidence,
+                }),
             )
+            db_workflow_id = wf_row["id"]
+
+            # 2 — Insert into orders (upsert on workflow_id to stay idempotent)
+            extracted = ctx.extracted_po
+            order_number = f"WA-{ctx.workflow_id[:8].upper()}"
+            order_row = await db.fetchrow(
+                """
+                INSERT INTO orders (
+                    org_id, order_number, buyer_id, status,
+                    currency, payment_terms, incoterms,
+                    port_of_discharge, destination_country,
+                    po_source, po_raw_text, workflow_id
+                )
+                VALUES (
+                    $1, $2,
+                    (SELECT id FROM contacts
+                     WHERE org_id = $1 LIMIT 1),
+                    $3, $4, $5, $6, $7, $8, $9, $10, $11
+                )
+                ON CONFLICT (org_id, order_number) DO UPDATE
+                    SET status = EXCLUDED.status
+                RETURNING id
+                """,
+                _uuid.UUID(ctx.org_id),
+                order_number,
+                "awaiting_approval" if decision["requires_human"] else "documents_pending",
+                (extracted.get("currency") or "USD")[:3],
+                extracted.get("payment_terms"),
+                extracted.get("incoterms"),
+                extracted.get("destination_port"),
+                (extracted.get("buyer_country") or "AE")[:2].upper(),
+                ctx.source,
+                extracted.get("raw_text") or None,
+                db_workflow_id,
+            )
+            ctx.order_id = str(order_row["id"])
+
+            if decision["requires_human"]:
+                # 3 — Insert approval_request
+                approval_uuid = _uuid.uuid4()
+                ctx.approval_id = str(approval_uuid)
+                expires = (
+                    __import__("datetime").datetime.now(timezone.utc)
+                    + timedelta(hours=4)
+                )
+                await db.execute(
+                    """
+                    INSERT INTO approval_requests (
+                        id, org_id, workflow_id, order_id,
+                        requested_by, title, description,
+                        ai_confidence, risk_flags, suggested_action,
+                        diff_after, assigned_to, expires_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4,
+                        $5, $6, $7,
+                        $8, $9, $10,
+                        $11, $12, $13
+                    )
+                    """,
+                    approval_uuid,
+                    _uuid.UUID(ctx.org_id),
+                    db_workflow_id,
+                    order_row["id"],
+                    "hitl_supervisor_agent",
+                    f"PO Review Required — {order_number}",
+                    decision["reason"],
+                    ctx.overall_confidence,
+                    _json.dumps(ctx.risk_flags),
+                    decision["decision"],
+                    _json.dumps(ctx.documents),
+                    _uuid.UUID(SEED_USER_ID),
+                    expires,
+                )
+                print(f"[HITL] approval_request created: {approval_uuid}  order: {ctx.order_id}")
+
+                return StepResult(
+                    status=StepStatus.COMPLETED,
+                    output=decision,
+                    confidence=ctx.overall_confidence,
+                    requires_human=True,
+                    human_reason=decision["reason"],
+                )
 
         return StepResult(status=StepStatus.COMPLETED, output=decision, confidence=ctx.overall_confidence)
 
     async def step_send_notifications(ctx: WorkflowContext) -> StepResult:
+        """
+        Send order confirmation to the buyer.
+
+        Current: formatted WhatsApp text message with invoice summary.
+
+        PDF attachment hook:
+          When PDF generation is ready, call:
+              pdf_bytes = await generate_invoice_pdf(ctx.documents["commercial_invoice"])
+              pdf_url   = await upload_to_storage(pdf_bytes, filename)
+              await WhatsAppService.send_document(to=buyer_wa, doc_url=pdf_url,
+                                                  filename="invoice.pdf",
+                                                  caption="Your commercial invoice")
+          then remove / replace the send_text call below.
+        """
         from services.api.main import WhatsAppService
 
         buyer_wa = ctx.raw_input.get("buyer_whatsapp")
         invoice  = ctx.documents.get("commercial_invoice", {})
+        packing  = ctx.documents.get("packing_list", {})
 
         if buyer_wa:
             try:
-                await WhatsAppService.send_text(
-                    to=buyer_wa,
-                    body=(
-                        f"✅ Order confirmed!\n\n"
-                        f"📄 Invoice: {invoice.get('invoice_number', 'N/A')}\n"
-                        f"💰 Amount: {invoice.get('currency')} {invoice.get('grand_total')}\n"
-                        f"📦 Terms: {invoice.get('incoterms')} | {invoice.get('payment_terms')}\n"
-                        f"🚢 Shipment in 3 working days.\n\nDocuments to follow. Thank you!"
-                    )
+                # Build a rich invoice summary message
+                items_lines = "\n".join(
+                    f"  • {v.get('description','?')}  "
+                    f"qty {v.get('qty','?')} {v.get('unit','')}  "
+                    f"@ {invoice.get('currency','')} {v.get('unit_price','?')}"
+                    for v in (invoice.get("items") or [])[:5]   # cap at 5 lines
+                ) or "  (see attached invoice)"
+
+                body = (
+                    f"✅ *Order Confirmed — {invoice.get('invoice_number','N/A')}*\n\n"
+                    f"📅 Date: {invoice.get('invoice_date','—')}\n"
+                    f"💰 Total: {invoice.get('currency','')} {invoice.get('grand_total','—')}\n"
+                    f"📦 Incoterms: {invoice.get('incoterms','—')} | {invoice.get('payment_terms','—')}\n\n"
+                    f"*Items:*\n{items_lines}\n\n"
+                    f"📦 Packages: {packing.get('total_packages','—')}  "
+                    f"Net wt: {packing.get('total_net_weight_kg','—')} kg\n\n"
+                    f"🚢 Shipment in 3 working days. Documents to follow.\n"
+                    f"Reference: {ctx.workflow_id[:8].upper()}"
                 )
+
+                await WhatsAppService.send_text(to=buyer_wa, body=body)
                 ctx.sent_channels.append("whatsapp")
-            except Exception:
-                pass  # Non-critical — log and continue
+
+                # ── PDF attachment hook ──────────────────────────────────────
+                # Uncomment + implement when PDF generation is available:
+                #
+                # from services.pdf.generator import generate_invoice_pdf
+                # from services.storage import upload_to_storage
+                # pdf_bytes = await generate_invoice_pdf(invoice)
+                # pdf_url   = await upload_to_storage(
+                #     pdf_bytes,
+                #     f"invoices/{ctx.workflow_id}/{invoice.get('invoice_number','inv')}.pdf"
+                # )
+                # await WhatsAppService.send_document(
+                #     to=buyer_wa,
+                #     doc_url=pdf_url,
+                #     filename=f"{invoice.get('invoice_number','invoice')}.pdf",
+                #     caption=f"Commercial Invoice — {invoice.get('invoice_number','')}",
+                # )
+                # ctx.sent_channels.append("whatsapp_document")
+                # ── end PDF hook ─────────────────────────────────────────────
+
+            except Exception as exc:
+                print(f"[step_send_notifications] WhatsApp send failed: {exc}")
+                # Non-critical — log and continue; skip_on_error=True handles the step
 
         return StepResult(status=StepStatus.COMPLETED, output={"sent": ctx.sent_channels}, confidence=100)
 
     async def step_create_shipment(ctx: WorkflowContext) -> StepResult:
+        from core.db import get_pool
         import uuid as _uuid
-        ctx.shipment_id = str(_uuid.uuid4())
-        # In production: INSERT into shipments, trigger carrier booking workflow
+
+        pool = get_pool()
+        async with pool.acquire() as db:
+            shipment_uuid = _uuid.uuid4()
+
+            # order_id is set by step_hitl_decision; fall back to None if skipped
+            order_id = _uuid.UUID(ctx.order_id) if ctx.order_id else None
+
+            extracted = ctx.extracted_po
+            await db.execute(
+                """
+                INSERT INTO shipments (
+                    id, org_id, order_id,
+                    port_of_loading, port_of_discharge,
+                    status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                shipment_uuid,
+                _uuid.UUID(ctx.org_id),
+                order_id,
+                extracted.get("port_of_loading") or None,
+                extracted.get("destination_port") or None,
+                "booking_pending",
+            )
+            ctx.shipment_id = str(shipment_uuid)
+            print(f"[Logistics] shipment created: {shipment_uuid}  order: {order_id}")
+
         return StepResult(
             status=StepStatus.COMPLETED,
             output={"shipment_id": ctx.shipment_id},
-            confidence=100
+            confidence=100,
         )
 
     # ── WIRE THE MACHINE ──────────────────────────────────
