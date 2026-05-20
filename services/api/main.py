@@ -44,14 +44,19 @@ class Settings:
     )
 
     # LLM Provider chain (tried in order, with fallback)
-    # Priority 1→6: OpenAI → Groq → xAI Grok → Anthropic → Gemini → Local Ollama
+    # Priority 1→6: Local Ollama → Groq → OpenAI → xAI Grok → Anthropic → Gemini
+    # Local Ollama (qwen2.5:3b) is always tried first — zero cost, zero latency,
+    # and fully private. Cloud providers kick in only when Ollama is unavailable.
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:3b")
+
     LLM_CHAIN = [
-        {"provider": "openai",    "model": "gpt-4o",                  "priority": 1},
-        {"provider": "groq",      "model": "llama-3.3-70b-versatile", "priority": 2},
-        {"provider": "grok",      "model": "grok-3",                  "priority": 3},
-        {"provider": "anthropic", "model": "claude-opus-4-6",         "priority": 4},
-        {"provider": "gemini",    "model": "gemini-2.0-flash",        "priority": 5},
-        {"provider": "local",     "model": "mistral-7b-q4",           "priority": 6},
+        {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),  "priority": 1},
+        {"provider": "groq",      "model": "llama-3.3-70b-versatile",                "priority": 2},
+        {"provider": "openai",    "model": "gpt-4o",                                 "priority": 3},
+        {"provider": "grok",      "model": "grok-3",                                 "priority": 4},
+        {"provider": "anthropic", "model": "claude-opus-4-6",                        "priority": 5},
+        {"provider": "gemini",    "model": "gemini-2.0-flash",                       "priority": 6},
     ]
 
     # Workflow
@@ -323,6 +328,10 @@ class LLMRouter:
     @staticmethod
     def _ensure_provider_configured(provider_cfg: dict) -> None:
         provider = provider_cfg["provider"]
+        # local Ollama is always considered "configured" — reachability is validated
+        # at call time; a connection error will trigger fallback automatically.
+        if provider == "local":
+            return
         if provider == "openai" and not LLMRouter._looks_configured(LLMRouter._env("OPENAI_API_KEY")):
             raise ValueError("OPENAI_API_KEY is not configured")
         if provider == "anthropic" and not LLMRouter._looks_configured(LLMRouter._env("ANTHROPIC_API_KEY")):
@@ -473,11 +482,17 @@ class LLMRouter:
 
     @staticmethod
     async def _local(model, system, user, max_tokens, temperature) -> dict:
-        async with httpx.AsyncClient(timeout=120) as client:
+        # OLLAMA_BASE_URL defaults to the Docker service name so this works
+        # inside the compose network. Override to http://localhost:11434 for
+        # local dev outside Docker.
+        base_url = LLMRouter._env("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+        # OLLAMA_MODEL in env always wins over whatever the chain passed in
+        resolved_model = LLMRouter._env("OLLAMA_MODEL") or model
+        async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
-                "http://localhost:11434/api/chat",
+                f"{base_url}/api/chat",
                 json={
-                    "model": model,
+                    "model": resolved_model,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user",   "content": user},
@@ -665,6 +680,22 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
             memory_type="hs_code_learned",
         )
 
+        # Single compact schema — works for all providers including small Ollama models.
+        # Heavy optional fields (dgft_schedule, import_duty_destination, restrictions)
+        # are omitted: qwen2.5:3b skips them and the workflow doesn't use them.
+        output_schema = {
+            "validations": [{
+                "original_description": "string",
+                "original_hs_code":     "string",
+                "validated_hs_code":    "string",
+                "is_valid":             True,
+                "confidence":           90,
+                "correction_reason":    "string",
+            }],
+            "overall_clearance": True,
+            "flags": [],
+        }
+
         result = await self.llm.complete(
             system_prompt=system_prompt,
             user_prompt=(
@@ -672,22 +703,7 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
                 f"{json.dumps(items, indent=2)}\n"
                 f"Previously validated codes for this org: {json.dumps(cached_codes)}"
             ),
-            output_schema={
-                "validations": [{
-                    "original_description": "string",
-                    "original_hs_code": "string",
-                    "validated_hs_code": "string",
-                    "is_valid": True,
-                    "confidence": 0,
-                    "description_match": True,
-                    "restrictions": [],
-                    "correction_reason": "string",
-                    "dgft_schedule": "string",
-                    "import_duty_destination": 0,
-                }],
-                "overall_clearance": True,
-                "flags": [],
-            },
+            output_schema=output_schema,
             temperature=0.0,
         )
 

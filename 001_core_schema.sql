@@ -10,7 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "vector";          -- pgvector for agent memory
 
 -- ─── 1. TENANCY ───────────────────────────────────────────
 
-CREATE TABLE organizations (
+CREATE TABLE IF NOT EXISTS organizations (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            TEXT NOT NULL,
     slug            TEXT UNIQUE NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE organizations (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     email           TEXT NOT NULL,
@@ -44,11 +44,11 @@ CREATE TABLE users (
     UNIQUE (org_id, email)
 );
 
-CREATE INDEX idx_users_org ON users(org_id);
+CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id);
 
 -- ─── 2. CONTACTS (Buyers / Suppliers) ──────────────────────
 
-CREATE TABLE contacts (
+CREATE TABLE IF NOT EXISTS contacts (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     type            TEXT NOT NULL CHECK (type IN ('buyer','supplier','freight','customs_broker','bank')),
@@ -70,11 +70,11 @@ CREATE TABLE contacts (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_contacts_org ON contacts(org_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_org ON contacts(org_id);
 
 -- ─── 3. PRODUCTS / SKUs ───────────────────────────────────
 
-CREATE TABLE products (
+CREATE TABLE IF NOT EXISTS products (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     sku             TEXT NOT NULL,
@@ -90,11 +90,11 @@ CREATE TABLE products (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX idx_products_org_sku ON products(org_id, sku);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_products_org_sku ON products(org_id, sku);
 
 -- ─── 4. ORDERS ────────────────────────────────────────────
 
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     order_number    TEXT NOT NULL,
@@ -126,7 +126,7 @@ CREATE TABLE orders (
     UNIQUE (org_id, order_number)
 );
 
-CREATE TABLE order_items (
+CREATE TABLE IF NOT EXISTS order_items (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     order_id        UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     product_id      UUID REFERENCES products(id),
@@ -142,7 +142,7 @@ CREATE TABLE order_items (
 
 -- ─── 5. DOCUMENTS ─────────────────────────────────────────
 
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     order_id        UUID REFERENCES orders(id),
@@ -178,12 +178,12 @@ CREATE TABLE documents (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_documents_org_order ON documents(org_id, order_id);
-CREATE INDEX idx_documents_type_status ON documents(doc_type, status);
+CREATE INDEX IF NOT EXISTS idx_documents_org_order ON documents(org_id, order_id);
+CREATE INDEX IF NOT EXISTS idx_documents_type_status ON documents(doc_type, status);
 
 -- ─── 6. WORKFLOWS ─────────────────────────────────────────
 
-CREATE TABLE workflows (
+CREATE TABLE IF NOT EXISTS workflows (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     order_id        UUID REFERENCES orders(id),
@@ -204,7 +204,7 @@ CREATE TABLE workflows (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE workflow_steps (
+CREATE TABLE IF NOT EXISTS workflow_steps (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     workflow_id     UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
     step_name       TEXT NOT NULL,
@@ -223,11 +223,11 @@ CREATE TABLE workflow_steps (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_workflow_steps_workflow ON workflow_steps(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_steps_workflow ON workflow_steps(workflow_id);
 
 -- ─── 7. HITL — HUMAN IN THE LOOP ──────────────────────────
 
-CREATE TABLE approval_requests (
+CREATE TABLE IF NOT EXISTS approval_requests (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     workflow_id     UUID NOT NULL REFERENCES workflows(id),
@@ -255,13 +255,13 @@ CREATE TABLE approval_requests (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_approvals_org_status ON approval_requests(org_id, status);
-CREATE INDEX idx_approvals_assigned ON approval_requests(assigned_to, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_org_status ON approval_requests(org_id, status);
+CREATE INDEX IF NOT EXISTS idx_approvals_assigned ON approval_requests(assigned_to, status);
 
 -- ─── 8. AUDIT TRAIL ───────────────────────────────────────
 
-CREATE TABLE audit_log (
-    id              BIGSERIAL PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              BIGSERIAL,
     org_id          UUID NOT NULL,
     actor_type      TEXT NOT NULL CHECK (actor_type IN ('user','agent','system')),
     actor_id        TEXT NOT NULL,                     -- user UUID or agent name
@@ -273,23 +273,24 @@ CREATE TABLE audit_log (
     metadata        JSONB NOT NULL DEFAULT '{}',
     ip_address      INET,
     user_agent      TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (id, created_at)   -- partition key must be part of PK
 ) PARTITION BY RANGE (created_at);
 
 -- Monthly partitions
-CREATE TABLE audit_log_2025_01 PARTITION OF audit_log
+CREATE TABLE IF NOT EXISTS audit_log_2025_01 PARTITION OF audit_log
     FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
-CREATE TABLE audit_log_2025_02 PARTITION OF audit_log
+CREATE TABLE IF NOT EXISTS audit_log_2025_02 PARTITION OF audit_log
     FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
-CREATE TABLE audit_log_2025_03 PARTITION OF audit_log
+CREATE TABLE IF NOT EXISTS audit_log_2025_03 PARTITION OF audit_log
     FOR VALUES FROM ('2025-03-01') TO ('2025-04-01');
-CREATE TABLE audit_log_default  PARTITION OF audit_log DEFAULT;
+CREATE TABLE IF NOT EXISTS audit_log_default  PARTITION OF audit_log DEFAULT;
 
-CREATE INDEX idx_audit_org_entity ON audit_log(org_id, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_org_entity ON audit_log(org_id, entity_type, entity_id);
 
 -- ─── 9. AGENT MEMORY ──────────────────────────────────────
 
-CREATE TABLE agent_memory (
+CREATE TABLE IF NOT EXISTS agent_memory (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     agent_name      TEXT NOT NULL,
@@ -313,14 +314,14 @@ CREATE TABLE agent_memory (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_memory_org_agent ON agent_memory(org_id, agent_name, memory_type);
-CREATE INDEX idx_memory_scope ON agent_memory(scope_type, scope_id);
-CREATE INDEX idx_memory_embedding ON agent_memory USING ivfflat (embedding vector_cosine_ops)
+CREATE INDEX IF NOT EXISTS idx_memory_org_agent ON agent_memory(org_id, agent_name, memory_type);
+CREATE INDEX IF NOT EXISTS idx_memory_scope ON agent_memory(scope_type, scope_id);
+CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
 -- ─── 10. PROMPT REGISTRY ──────────────────────────────────
 
-CREATE TABLE prompt_registry (
+CREATE TABLE IF NOT EXISTS prompt_registry (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID,                              -- NULL = global
     agent_name      TEXT NOT NULL,
@@ -342,13 +343,13 @@ CREATE TABLE prompt_registry (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX idx_prompt_agent_key_version
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_agent_key_version
     ON prompt_registry(agent_name, prompt_key, version);
-CREATE INDEX idx_prompt_active ON prompt_registry(agent_name, prompt_key, is_active);
+CREATE INDEX IF NOT EXISTS idx_prompt_active ON prompt_registry(agent_name, prompt_key, is_active);
 
 -- ─── 11. COMMUNICATIONS ───────────────────────────────────
 
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     order_id        UUID REFERENCES orders(id),
@@ -373,12 +374,12 @@ CREATE TABLE messages (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_messages_org_order ON messages(org_id, order_id);
-CREATE INDEX idx_messages_contact ON messages(contact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_org_order ON messages(org_id, order_id);
+CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact_id, created_at DESC);
 
 -- ─── 12. SHIPMENTS ────────────────────────────────────────
 
-CREATE TABLE shipments (
+CREATE TABLE IF NOT EXISTS shipments (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     order_id        UUID NOT NULL REFERENCES orders(id),
@@ -409,7 +410,7 @@ CREATE TABLE shipments (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE shipment_events (
+CREATE TABLE IF NOT EXISTS shipment_events (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     shipment_id     UUID NOT NULL REFERENCES shipments(id) ON DELETE CASCADE,
     event_code      TEXT NOT NULL,
@@ -423,7 +424,7 @@ CREATE TABLE shipment_events (
 
 -- ─── 13. COMPLIANCE KB ────────────────────────────────────
 
-CREATE TABLE hs_codes (
+CREATE TABLE IF NOT EXISTS hs_codes (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     code            TEXT NOT NULL UNIQUE,
     description     TEXT NOT NULL,
@@ -434,7 +435,7 @@ CREATE TABLE hs_codes (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE country_trade_rules (
+CREATE TABLE IF NOT EXISTS country_trade_rules (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     from_country    CHAR(2) NOT NULL,
     to_country      CHAR(2) NOT NULL,
@@ -449,7 +450,7 @@ CREATE TABLE country_trade_rules (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_country_rules_route ON country_trade_rules(from_country, to_country);
+CREATE INDEX IF NOT EXISTS idx_country_rules_route ON country_trade_rules(from_country, to_country);
 
 -- ─── Helper: auto-updated timestamps ──────────────────────
 

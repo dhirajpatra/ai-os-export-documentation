@@ -23,6 +23,8 @@ Seed data
 from __future__ import annotations
 
 import os
+import pathlib
+import re
 import asyncpg
 
 # ── Fixed seed UUIDs — must match get_org_context() in main.py ──────────────
@@ -53,6 +55,96 @@ def _build_dsn() -> str:
     return url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    """
+    Split SQL source into individual statements on ';', but correctly
+    handle PostgreSQL dollar-quoted strings ($$...$$, $tag$...$tag$)
+    which may contain semicolons internally.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(sql)
+    in_dollar_quote = False
+    dollar_tag = ""
+
+    while i < n:
+        # Detect dollar-quote open/close: $optionalTag$
+        if sql[i] == '$':
+            m = re.match(r'\$[A-Za-z_0-9]*\$', sql[i:])
+            if m:
+                tag = m.group(0)
+                if not in_dollar_quote:
+                    in_dollar_quote = True
+                    dollar_tag = tag
+                    buf.append(tag)
+                    i += len(tag)
+                    continue
+                elif tag == dollar_tag:
+                    in_dollar_quote = False
+                    dollar_tag = ""
+                    buf.append(tag)
+                    i += len(tag)
+                    continue
+
+        if sql[i] == ';' and not in_dollar_quote:
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(sql[i])
+        i += 1
+
+    # Trailing content without a final semicolon
+    stmt = "".join(buf).strip()
+    if stmt:
+        statements.append(stmt)
+
+    return statements
+
+
+async def auto_migrate(pool: asyncpg.Pool) -> None:
+    """
+    Apply 001_core_schema.sql idempotently on every startup.
+    Uses a dollar-quote-aware SQL splitter so CREATE FUNCTION / DO $$ blocks
+    with internal semicolons are kept intact and executed as one statement.
+    """
+    candidates = [
+        pathlib.Path("/app/001_core_schema.sql"),                              # Docker
+        pathlib.Path(__file__).parent.parent.parent / "001_core_schema.sql",  # local dev
+    ]
+    sql_path = next((p for p in candidates if p.exists()), None)
+    if sql_path is None:
+        print("⚠️  001_core_schema.sql not found — skipping auto-migration.")
+        return
+
+    statements = _split_sql_statements(sql_path.read_text())
+
+    ok = skipped = errors = 0
+    async with pool.acquire() as conn:
+        for stmt in statements:
+            # Skip blank/comment-only chunks
+            code_lines = [
+                l for l in stmt.splitlines()
+                if l.strip() and not l.strip().startswith("--")
+            ]
+            if not code_lines:
+                skipped += 1
+                continue
+            try:
+                await conn.execute(stmt)
+                ok += 1
+            except Exception as exc:
+                errors += 1
+                snippet = stmt[:120].replace("\n", " ")
+                print(f"⚠️  Migration stmt error (non-fatal): {exc} | SQL: {snippet}…")
+
+    print(f"✅ DB schema migration complete — {ok} ok, {skipped} skipped, {errors} errors | {sql_path}")
+
+
 async def init_pool() -> asyncpg.Pool:
     """Open the connection pool. Call once at startup."""
     global _pool
@@ -66,6 +158,7 @@ async def init_pool() -> asyncpg.Pool:
     print(f"✅ DB pool opened — {os.getenv('POSTGRES_HOST','postgres')}:"
           f"{os.getenv('POSTGRES_PORT','5432')}/"
           f"{os.getenv('POSTGRES_DB','tradeos')}")
+    await auto_migrate(_pool)      # ← apply schema before seeding
     await ensure_seed_data(_pool)
     return _pool
 
