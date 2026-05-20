@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 from fastapi import (
-    BackgroundTasks, Depends, FastAPI, File, HTTPException,
+    BackgroundTasks, Depends, FastAPI, File, Form, HTTPException,
     Request, UploadFile, WebSocket, WebSocketDisconnect, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,11 +38,12 @@ class Settings:
 
     # LLM Provider chain (tried in order, with fallback)
     LLM_CHAIN = [
-        {"provider": "openai",    "model": "gpt-4o",           "priority": 1},
-        {"provider": "grok",      "model": "grok-4",           "priority": 2},
-        {"provider": "anthropic", "model": "claude-opus-4-6",  "priority": 3},
-        {"provider": "gemini",    "model": "gemini-2.0-flash",  "priority": 4},
-        {"provider": "local",     "model": "mistral-7b-q4",    "priority": 5},
+        {"provider": "openai",    "model": "gpt-4o",                  "priority": 1},
+        {"provider": "groq",      "model": "llama-3.3-70b-versatile", "priority": 2},
+        {"provider": "grok",      "model": "llama-3.3-70b-versatile",                "priority": 3},
+        {"provider": "anthropic", "model": "claude-opus-4-6",         "priority": 4},
+        {"provider": "gemini",    "model": "gemini-2.0-flash",        "priority": 5},
+        {"provider": "local",     "model": "mistral-7b-q4",           "priority": 6},
     ]
 
     # Workflow
@@ -73,6 +74,37 @@ class Settings:
 
 
 cfg = Settings()
+
+
+def parse_llm_json(text: str, context: str) -> Any:
+    """
+    Parse provider output that should be JSON, tolerating markdown fences
+    or short explanatory text around the object.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError(f"{context}: LLM returned an empty response")
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.removeprefix("```json").removeprefix("```").strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        object_start = cleaned.find("{")
+        array_start = cleaned.find("[")
+        starts = [idx for idx in (object_start, array_start) if idx != -1]
+        if not starts:
+            raise ValueError(f"{context}: LLM response was not JSON: {cleaned[:200]}")
+
+        start = min(starts)
+        end = max(cleaned.rfind("}"), cleaned.rfind("]"))
+        if end <= start:
+            raise ValueError(f"{context}: LLM response contained incomplete JSON: {cleaned[:200]}")
+
+        return json.loads(cleaned[start:end + 1])
 
 
 # ─────────────────────────────────────────────
@@ -156,6 +188,7 @@ class LLMRouter:
         errors = []
         for provider_cfg in sorted(cfg.LLM_CHAIN, key=lambda x: x["priority"]):
             try:
+                LLMRouter._ensure_provider_configured(provider_cfg)
                 result = await LLMRouter._call_provider(
                     provider_cfg, system_prompt, user_prompt,
                     output_schema, max_tokens, temperature
@@ -166,6 +199,33 @@ class LLMRouter:
                 errors.append(f"{provider_cfg['provider']}: {e}")
                 continue
         raise RuntimeError(f"All LLM providers failed: {errors}")
+
+    @staticmethod
+    def _env(name: str, default: str = "") -> str:
+        return os.getenv(name, default).strip().strip("\"'")
+
+    @staticmethod
+    def _looks_configured(value: str) -> bool:
+        lowered = value.strip().lower()
+        return bool(lowered) and lowered not in {"your key", "your_key", "change-me", "changeme"}
+
+    @staticmethod
+    def _ensure_provider_configured(provider_cfg: dict) -> None:
+        provider = provider_cfg["provider"]
+        if provider == "openai" and not LLMRouter._looks_configured(LLMRouter._env("OPENAI_API_KEY")):
+            raise ValueError("OPENAI_API_KEY is not configured")
+        if provider == "anthropic" and not LLMRouter._looks_configured(LLMRouter._env("ANTHROPIC_API_KEY")):
+            raise ValueError("ANTHROPIC_API_KEY is not configured")
+        if provider == "gemini" and not LLMRouter._looks_configured(LLMRouter._env("GEMINI_API_KEY")):
+            raise ValueError("GEMINI_API_KEY is not configured")
+        if provider == "groq":
+            groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
+            if not LLMRouter._looks_configured(groq_key) or not groq_key.startswith("gsk_"):
+                raise ValueError("GROQ_API_KEY is not configured")
+        if provider == "grok":
+            xai_key = LLMRouter._env("XAI_API_KEY")
+            if not LLMRouter._looks_configured(xai_key) or xai_key.startswith("gsk_"):
+                raise ValueError("XAI_API_KEY is not configured")
 
     @staticmethod
     async def _call_provider(
@@ -187,6 +247,8 @@ class LLMRouter:
 
         if provider == "openai":
             return await LLMRouter._openai(model, system_prompt, user_prompt, max_tokens, temperature)
+        elif provider == "groq":
+            return await LLMRouter._groq(model, system_prompt, user_prompt, max_tokens, temperature)
         elif provider == "grok":
             return await LLMRouter._grok(model, system_prompt, user_prompt, max_tokens, temperature)
         elif provider == "anthropic":
@@ -200,12 +262,11 @@ class LLMRouter:
 
     @staticmethod
     async def _anthropic(model, system, user, max_tokens, temperature) -> dict:
-        import os
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
-                    "x-api-key": os.getenv("ANTHROPIC_API_KEY", ""),
+                    "x-api-key": LLMRouter._env("ANTHROPIC_API_KEY"),
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
@@ -223,11 +284,10 @@ class LLMRouter:
 
     @staticmethod
     async def _openai(model, system, user, max_tokens, temperature) -> dict:
-        import os
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY','')}"},
+                headers={"Authorization": f"Bearer {LLMRouter._env('OPENAI_API_KEY')}"},
                 json={
                     "model": model,
                     "max_tokens": max_tokens,
@@ -243,15 +303,36 @@ class LLMRouter:
             return {"text": data["choices"][0]["message"]["content"]}
 
     @staticmethod
-    async def _grok(model, system, user, max_tokens, temperature) -> dict:
-        import os
-        base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+    async def _groq(model, system, user, max_tokens, temperature) -> dict:
+        base_url = LLMRouter._env("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+        groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('XAI_API_KEY','')}"},
+                headers={"Authorization": f"Bearer {groq_key}"},
                 json={
-                    "model": os.getenv("XAI_MODEL", model),
+                    "model": LLMRouter._env("GROQ_MODEL", model),
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user},
+                    ],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"text": data["choices"][0]["message"]["content"]}
+
+    @staticmethod
+    async def _grok(model, system, user, max_tokens, temperature) -> dict:
+        base_url = LLMRouter._env("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {LLMRouter._env('XAI_API_KEY')}"},
+                json={
+                    "model": LLMRouter._env("XAI_MODEL", model),
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "messages": [
@@ -266,11 +347,10 @@ class LLMRouter:
 
     @staticmethod
     async def _gemini(model, system, user, max_tokens, temperature) -> dict:
-        import os
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                params={"key": os.getenv("GEMINI_API_KEY", "")},
+                params={"key": LLMRouter._env("GEMINI_API_KEY")},
                 json={
                     "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
                     "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature},
@@ -387,7 +467,7 @@ class DocumentIntelligenceEngine:
             temperature=0.0,
         )
         try:
-            return json.loads(result["text"]).get("tables", [])
+            return parse_llm_json(result["text"], "table extraction").get("tables", [])
         except Exception:
             return []
 
@@ -438,7 +518,7 @@ class DocumentIntelligenceEngine:
             temperature=0.0,
         )
         try:
-            return json.loads(result["text"])
+            return parse_llm_json(result["text"], "document extraction")
         except Exception:
             return {}
 
@@ -500,7 +580,7 @@ Flag ambiguous fields as warnings, do not hallucinate.
             temperature=0.0,
         )
 
-        extracted = json.loads(result["text"])
+        extracted = parse_llm_json(result["text"], "PO extraction")
 
         # Learn: update buyer memory with this pattern
         await self._remember(
@@ -567,7 +647,7 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
             temperature=0.0,
         )
 
-        data = json.loads(result["text"])
+        data = parse_llm_json(result["text"], "HS code validation")
 
         # Learn validated codes
         for v in data.get("validations", []):
@@ -647,7 +727,7 @@ class DocumentGenerationAgent(BaseAgent):
             },
             temperature=0.0,
         )
-        return json.loads(result["text"])
+        return parse_llm_json(result["text"], "commercial invoice generation")
 
     async def _gen_packing_list(self, order: dict, overrides: dict, style: list) -> dict:
         result = await self.llm.complete(
@@ -664,7 +744,7 @@ class DocumentGenerationAgent(BaseAgent):
             },
             temperature=0.0,
         )
-        return json.loads(result["text"])
+        return parse_llm_json(result["text"], "packing list generation")
 
     async def _gen_coo(self, order: dict, overrides: dict, style: list) -> dict:
         result = await self.llm.complete(
@@ -673,7 +753,7 @@ class DocumentGenerationAgent(BaseAgent):
             output_schema={"_confidence": 0},
             temperature=0.0,
         )
-        return json.loads(result["text"])
+        return parse_llm_json(result["text"], "certificate of origin generation")
 
     async def _gen_bl_draft(self, order: dict, overrides: dict, style: list) -> dict:
         return {"_confidence": 90, "status": "draft"}
@@ -1082,9 +1162,9 @@ async def health():
 @app.post("/api/v1/workflow/po-to-dispatch")
 async def run_killer_demo(
     background_tasks: BackgroundTasks,
-    po_text: str | None = None,
-    buyer_whatsapp: str | None = None,
-    buyer_email: str | None = None,
+    po_text: str | None = Form(None),
+    buyer_whatsapp: str | None = Form(None),
+    buyer_email: str | None = Form(None),
     file: UploadFile | None = File(None),
     ctx: OrgContext = Depends(get_org_context),
 ):
@@ -1095,15 +1175,26 @@ async def run_killer_demo(
     → HITL decision → Send WhatsApp/Email → Return full result.
     """
     file_bytes = await file.read() if file else None
+    if not file_bytes and not (po_text or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send either po_text as a form field or upload a file.",
+        )
 
     workflow = KillerDemoWorkflow(org_id=ctx.org_id)
-    result   = await workflow.execute(
-        source="whatsapp" if not file else "file",
-        raw_text=po_text,
-        file_bytes=file_bytes,
-        buyer_whatsapp=buyer_whatsapp,
-        buyer_email=buyer_email,
-    )
+    try:
+        result = await workflow.execute(
+            source="whatsapp" if not file else "file",
+            raw_text=po_text,
+            file_bytes=file_bytes,
+            buyer_whatsapp=buyer_whatsapp,
+            buyer_email=buyer_email,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
     return result
 
 

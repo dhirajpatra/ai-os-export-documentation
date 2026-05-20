@@ -216,13 +216,14 @@ Tried in priority order. Automatic fallback on error.
 
 ```
 1. OpenAI GPT-4o          (priority 1 — speed + tool use)
-2. xAI Grok               (priority 2 — OpenAI-compatible API)
-3. Anthropic Claude        (priority 3 — best for long docs)
-4. Google Gemini 2.0 Flash (priority 4 — multimodal)
-5. Local Ollama/Mistral    (priority 5 — always-on fallback, no API cost)
+2. GroqCloud Llama         (priority 2 — fast OpenAI-compatible API)
+3. xAI Grok 4.3            (priority 3 — OpenAI-compatible API)
+4. Anthropic Claude        (priority 4 — best for long docs)
+5. Google Gemini 2.0 Flash (priority 5 — multimodal)
+6. Local Ollama/Mistral    (priority 6 — always-on fallback, no API cost)
 ```
 
-Switch priority or disable providers in `Settings.LLM_CHAIN`. **Never hardcode a model.**
+Switch priority or disable providers in `Settings.LLM_CHAIN`. GroqCloud keys usually start with `gsk_` and use `GROQ_API_KEY`; xAI Grok uses `XAI_API_KEY`. **Never hardcode a model.**
 
 ---
 
