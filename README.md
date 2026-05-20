@@ -179,7 +179,7 @@ curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
 docker compose --profile dev up ngrok
 # Twilio webhook URL: https://<ngrok-domain>/api/v1/webhooks/twilio/whatsapp
 # Meta webhook URL: https://<ngrok-domain>/api/v1/webhooks/whatsapp
-# ngrok http 8000 --domain=preindulgent-madonna-reliably.ngrok-free.dev
+# ngrok http 8000 --url=preindulgent-madonna-reliably.ngrok-free.dev
 ```
 
 ---
