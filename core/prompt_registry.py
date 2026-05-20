@@ -613,7 +613,7 @@ class PromptTester:
         """
         test_cases: [{"input": {...}, "expected_output": {...}, "min_confidence": 80}]
         """
-        from services.api.main import LLMRouter
+        from main import LLMRouter
 
         prompt  = PromptRegistry.get(agent_name, prompt_key, version)
         results = []

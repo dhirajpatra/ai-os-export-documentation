@@ -278,22 +278,34 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
     # ── STEP IMPLEMENTATIONS ──────────────────────────────
 
     async def step_extract_po(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import POExtractionAgent, DocumentIntelligenceEngine
+        from main import POExtractionAgent, DocumentIntelligenceEngine
         import uuid as _uuid
 
         agent    = POExtractionAgent(org_id=_uuid.UUID(ctx.org_id))
         raw_text = ctx.raw_input.get("raw_text", "")
+        doc_preextracted: dict = {}
 
         if ctx.raw_input.get("file_bytes"):
             doc_result = await DocumentIntelligenceEngine.extract_from_file(
                 ctx.raw_input["file_bytes"], ctx.raw_input.get("mime_type", "application/pdf")
             )
+            # Prefer the OCR'd text; fall back to any raw_text already in the input
             raw_text = doc_result.get("raw_text", "") or raw_text
+            # The full_document_pipeline also runs an LLM pass — keep it as
+            # supplementary context so the PO agent can fill gaps
+            doc_preextracted = doc_result.get("extracted", {})
 
-        result = await agent.run({"source": ctx.source, "raw_text": raw_text})
+        result    = await agent.run({"source": ctx.source, "raw_text": raw_text})
         extracted = result["data"]
+
+        # Merge pre-extracted fields for any nulls the PO agent left blank
+        # (pre-extracted is lower-trust; never overwrite what the PO agent set)
+        for field_name, value in doc_preextracted.items():
+            if value and not extracted.get(field_name):
+                extracted[field_name] = value
+
         ctx.extracted_po = extracted
-        confidence = float(extracted.get("confidence", 0))
+        confidence = float(extracted.get("confidence") or 0)
         ctx.overall_confidence = confidence
 
         return StepResult(
@@ -306,7 +318,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         ctx.extracted_po = {}
 
     async def step_validate_hs(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import HSCodeValidationAgent
+        from main import HSCodeValidationAgent
         import uuid as _uuid
 
         agent = HSCodeValidationAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -331,7 +343,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         return StepResult(status=StepStatus.COMPLETED, output=hs_data, confidence=confidence)
 
     async def step_generate_documents(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import DocumentGenerationAgent
+        from main import DocumentGenerationAgent
         import uuid as _uuid
 
         agent     = DocumentGenerationAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -363,7 +375,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         ctx.documents = {}
 
     async def step_hitl_decision(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import HITLOrchestrator
+        from main import HITLOrchestrator
         import uuid as _uuid
 
         decision = HITLOrchestrator.evaluate(
@@ -384,7 +396,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         return StepResult(status=StepStatus.COMPLETED, output=decision, confidence=ctx.overall_confidence)
 
     async def step_send_notifications(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import WhatsAppService
+        from main import WhatsAppService
 
         buyer_wa = ctx.raw_input.get("buyer_whatsapp")
         invoice  = ctx.documents.get("commercial_invoice", {})

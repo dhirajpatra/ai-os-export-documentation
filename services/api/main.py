@@ -528,110 +528,27 @@ class BaseAgent:
 
 # ─────────────────────────────────────────────
 # DOCUMENT INTELLIGENCE ENGINE
+# Thin orchestration layer — all OCR logic lives
+# in services/ocr_service.py for clean separation.
 # ─────────────────────────────────────────────
 
 class DocumentIntelligenceEngine:
     """
-    Core IP layer.
-    OCR → Table extraction → Structured parsing → Validation.
+    Orchestrates the full document intelligence pipeline.
+    Actual OCR, table detection, and LLM extraction are
+    delegated to core.ocr_service — import from there directly
+    when you need individual stages.
     """
 
     @staticmethod
     async def extract_from_file(file_bytes: bytes, mime_type: str) -> dict:
-        """Multi-modal extraction pipeline."""
-        # Step 1: OCR (PaddleOCR / Azure Document Intelligence)
-        raw_text = await DocumentIntelligenceEngine._ocr(file_bytes, mime_type)
-
-        # Step 2: Table detection
-        tables   = await DocumentIntelligenceEngine._extract_tables(raw_text)
-
-        # Step 3: Signature/stamp detection (vision model)
-        stamps   = await DocumentIntelligenceEngine._detect_stamps(file_bytes)
-
-        # Step 4: LLM structured extraction
-        extracted = await DocumentIntelligenceEngine._llm_extract(raw_text, tables)
-
-        return {
-            "raw_text": raw_text,
-            "tables":   tables,
-            "stamps":   stamps,
-            "extracted": extracted,
-        }
-
-    @staticmethod
-    async def _ocr(file_bytes: bytes, mime_type: str) -> str:
-        """PaddleOCR → correction LLM pass for low-confidence tokens."""
-        # Production: call PaddleOCR service, then correction pass
-        return "[OCR output placeholder]"
-
-    @staticmethod
-    async def _extract_tables(text: str) -> list[dict]:
-        """Detect and parse tabular structures from OCR output."""
-        result = await LLMRouter.complete(
-            system_prompt=(
-                "You are a document parser specialized in trade documents. "
-                "Extract all table structures as JSON arrays. "
-                "Handle merged cells, rotated headers, and partial columns."
-            ),
-            user_prompt=f"Extract tables from this document text:\n\n{text}",
-            output_schema={"tables": [{"headers": [], "rows": []}]},
-            temperature=0.0,
-        )
-        try:
-            return parse_llm_json(result["text"], "table extraction").get("tables", [])
-        except Exception:
-            return []
-
-    @staticmethod
-    async def _detect_stamps(file_bytes: bytes) -> dict:
-        """Vision model for stamp/signature detection."""
-        return {"has_signature": None, "has_stamp": None, "stamp_text": None}
-
-    @staticmethod
-    async def _llm_extract(text: str, tables: list) -> dict:
-        result = await LLMRouter.complete(
-            system_prompt=(
-                "You are an expert in international trade documentation. "
-                "Extract all relevant fields from export/import documents. "
-                "For HS codes, always include your confidence (0-100). "
-                "Normalize quantities to standard units."
-            ),
-            user_prompt=(
-                f"Document text:\n{text}\n\nTables:\n{json.dumps(tables)}"
-                "\n\nExtract all fields."
-            ),
-            output_schema={
-                "doc_type": "string",
-                "reference_number": "string",
-                "date": "string",
-                "parties": {
-                    "exporter": {"name": "", "address": "", "iec": ""},
-                    "importer": {"name": "", "address": ""},
-                },
-                "items": [{
-                    "description": "",
-                    "hs_code": "",
-                    "hs_confidence": 0,
-                    "quantity": 0,
-                    "unit": "",
-                    "unit_price": 0,
-                    "total_value": 0,
-                    "country_of_origin": "",
-                }],
-                "total_value": 0,
-                "currency": "",
-                "payment_terms": "",
-                "incoterms": "",
-                "special_conditions": [],
-                "overall_confidence": 0,
-                "extraction_warnings": [],
-            },
-            temperature=0.0,
-        )
-        try:
-            return parse_llm_json(result["text"], "document extraction")
-        except Exception:
-            return {}
+        """
+        Full pipeline: OCR → table detection → stamp detection → LLM extraction.
+        Returns: {raw_text, tables, stamps, extracted}
+        Raises RuntimeError if text extraction fails entirely.
+        """
+        from core.ocr_service import full_document_pipeline
+        return await full_document_pipeline(file_bytes, mime_type)
 
 
 # ─────────────────────────────────────────────
@@ -1454,8 +1371,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
       - text:     PO sent as plain WhatsApp text
       - document: PO sent as a PDF attachment (downloaded from Meta)
     """
-    from core.workflow_engine import build_po_to_dispatch_workflow
-
     msg_type = msg.get("type")
     text     = msg.get("text", "")
     sender   = msg.get("from")
@@ -1466,14 +1381,23 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
     if msg_type == "document":
         media_id = msg.get("media_id")
         if not media_id:
-            return  # malformed payload — skip
-        # Acknowledge receipt immediately so buyer isn't left waiting
-        await WhatsAppService.send_text(
-            to=sender,
-            body="📄 PDF received! Processing your purchase order...",
-        )
-        file_bytes = await WhatsAppService.download_media(media_id)
-        mime_type  = msg.get("mime_type", "application/pdf")
+            # Twilio sends media_urls instead of media_id
+            media_urls = msg.get("media_urls", [])
+            if media_urls:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.get(media_urls[0])
+                    resp.raise_for_status()
+                    file_bytes = resp.content
+            else:
+                return  # malformed payload — skip
+        else:
+            # Meta: acknowledge receipt immediately so buyer isn't left waiting
+            await WhatsAppService.send_text(
+                to=sender,
+                body="📄 PDF received! Processing your purchase order...",
+            )
+            file_bytes = await WhatsAppService.download_media(media_id)
+        mime_type = msg.get("mime_type", "application/pdf")
 
     elif msg_type == "text":
         if not text.strip():
@@ -1482,7 +1406,7 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
     else:
         return  # audio, image, sticker, etc. — ignore
 
-    # ── Build and run deterministic WorkflowEngine ─────────
+    # ── Build and run workflow (WorkflowEngine → KillerDemoWorkflow fallback) ─
     raw_input = {
         "raw_text":       text,
         "buyer_whatsapp": sender,
@@ -1493,23 +1417,68 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
 
     source = "file" if file_bytes else "whatsapp"
 
-    engine, _ = build_po_to_dispatch_workflow(
-        org_id=str(org_id),
-        source=source,
-        raw_input=raw_input,
-    )
-    result = await engine.run()
+    result: dict = {}
+    try:
+        # ── Primary: deterministic WorkflowEngine (saga pattern) ──
+        from core.workflow_engine import build_po_to_dispatch_workflow
+        engine, _ = build_po_to_dispatch_workflow(
+            org_id=str(org_id),
+            source=source,
+            raw_input=raw_input,
+        )
+        result = await engine.run()
 
-    print(f"[WA workflow] status={result['status']} confidence={result.get('overall_confidence')}")
+    except Exception as primary_exc:
+        import traceback
+        print(f"[WA workflow] WorkflowEngine failed — {primary_exc}")
+        traceback.print_exc()
+
+        # ── Fallback: KillerDemoWorkflow ──────────────────────────
+        try:
+            wf = KillerDemoWorkflow(org_id=org_id)
+            result = await wf.execute(
+                source=source,
+                raw_text=text or None,
+                file_bytes=file_bytes,
+                buyer_whatsapp=sender,
+            )
+            if result.get("status") == "awaiting_approval":
+                result["status"] = "awaiting_human"
+
+        except Exception as fallback_exc:
+            print(f"[WA workflow] KillerDemoWorkflow fallback also failed — {fallback_exc}")
+            traceback.print_exc()
+            if sender:
+                try:
+                    await WhatsAppService.send_text(
+                        to=sender,
+                        body=(
+                            "⚠️ We received your document but hit a temporary issue "
+                            "processing it. Our team has been notified and will follow up shortly."
+                        ),
+                    )
+                except Exception:
+                    pass
+            return
+
+    # ── Normalise confidence ──────────────────────────────────────
+    confidence = float(
+        result.get("overall_confidence")
+        or result.get("confidence")
+        or 0.0
+    )
+    result["overall_confidence"] = confidence
+
+    print(f"[WA workflow] status={result.get('status')} confidence={confidence}")
 
     # ── Notify sender of review status ────────────────────
-    if sender and result["status"] == "awaiting_human":
+    if sender and result.get("status") in ("awaiting_human", "awaiting_approval"):
         approval_id = result.get("approval_id", "N/A")
         await WhatsAppService.send_text(
             to=sender,
             body=(
                 f"✅ *PO Received & Processed!*\n\n"
-                f"🎯 Confidence: {result.get('overall_confidence', 0):.0f}%\n"
+                f"🎯 Confidence: {confidence:.0f}%\n"
                 f"📋 Status: Under Review\n\n"
                 f"⏳ Our team is reviewing your order. "
                 f"You'll receive the documents shortly.\n"
