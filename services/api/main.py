@@ -51,17 +51,16 @@ class Settings:
     OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:3b")
 
     LLM_CHAIN = [
-        {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"),  "priority": 1},
-        {"provider": "groq",      "model": "llama-3.3-70b-versatile",                "priority": 2},
+        {"provider": "groq",      "model": "llama-3.3-70b-versatile",                "priority": 1},
+        {"provider": "gemini",    "model": "gemini-2.5-flash-preview-04-17",         "priority": 2},
         {"provider": "openai",    "model": "gpt-4o",                                 "priority": 3},
-        {"provider": "grok",      "model": "grok-3",                                 "priority": 4},
-        {"provider": "anthropic", "model": "claude-opus-4-6",                        "priority": 5},
-        {"provider": "gemini",    "model": "gemini-2.0-flash",                       "priority": 6},
+        {"provider": "anthropic", "model": "claude-sonnet-4-6",                      "priority": 4},
+        {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"), "priority": 5},
     ]
 
     # Workflow
     TEMPORAL_HOST   = os.getenv("TEMPORAL_HOST",   "localhost:7233")
-    KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+    # NOTE: Kafka removed for MVP — use Redis pub/sub or Temporal signals for eventing
 
     # Storage
     S3_BUCKET = os.getenv("S3_BUCKET", "tradeos-documents")
@@ -339,13 +338,12 @@ class LLMRouter:
         if provider == "gemini" and not LLMRouter._looks_configured(LLMRouter._env("GEMINI_API_KEY")):
             raise ValueError("GEMINI_API_KEY is not configured")
         if provider == "groq":
+            # Supports GROQ_API_KEY or XAI_API_KEY (gsk_ prefix = Groq key)
             groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
-            if not LLMRouter._looks_configured(groq_key) or not groq_key.startswith("gsk_"):
-                raise ValueError("GROQ_API_KEY is not configured")
-        if provider == "grok":
-            xai_key = LLMRouter._env("XAI_API_KEY")
-            if not LLMRouter._looks_configured(xai_key) or xai_key.startswith("gsk_"):
-                raise ValueError("XAI_API_KEY is not configured")
+            if not LLMRouter._looks_configured(groq_key):
+                raise ValueError("GROQ_API_KEY / XAI_API_KEY is not configured")
+            if not groq_key.startswith("gsk_"):
+                raise ValueError("GROQ key must start with gsk_")
 
     @staticmethod
     async def _call_provider(
@@ -382,7 +380,7 @@ class LLMRouter:
 
     @staticmethod
     async def _anthropic(model, system, user, max_tokens, temperature) -> dict:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -424,7 +422,7 @@ class LLMRouter:
 
     @staticmethod
     async def _groq(model, system, user, max_tokens, temperature) -> dict:
-        base_url = LLMRouter._env("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+        base_url = (LLMRouter._env("GROQ_BASE_URL") or LLMRouter._env("XAI_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
         groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -467,9 +465,11 @@ class LLMRouter:
 
     @staticmethod
     async def _gemini(model, system, user, max_tokens, temperature) -> dict:
-        async with httpx.AsyncClient(timeout=60) as client:
+        # Allow env override of model name
+        resolved_model = LLMRouter._env("GEMINI_MODEL") or model
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:generateContent",
                 params={"key": LLMRouter._env("GEMINI_API_KEY")},
                 json={
                     "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
@@ -536,8 +536,8 @@ class BaseAgent:
         return []
 
     def _emit_event(self, event_type: str, payload: dict):
-        """Emit to Kafka event bus (non-blocking)."""
-        # kafka_producer.send(f"tradeos.{event_type}", payload)
+        """Emit event (MVP: fire-and-forget log; post-MVP: Redis pub/sub or Temporal signal)."""
+        # TODO post-MVP: push to Redis channel or Temporal signal
         pass
 
 
@@ -773,32 +773,42 @@ class DocumentGenerationAgent(BaseAgent):
                 "Format amounts correctly for the destination country."
             )
         result = await self.llm.complete(
-            system_prompt=system_prompt,
+            system_prompt=(
+                "Generate a complete commercial invoice for international export. "
+                "Follow UNCTAD/ICC standards. Include all mandatory fields for LC documentation. "
+                "Apply Indian GST zero-rating for exports (LUT). "
+                "Return ONLY valid JSON, no explanation."
+            ),
             user_prompt=(
                 f"Generate commercial invoice for:\n{json.dumps(order, indent=2)}"
                 f"\nOverrides: {json.dumps(overrides)}"
-                f"\nBuyer style preferences: {json.dumps(style)}"
             ),
             output_schema={
                 "invoice_number": "string",
                 "invoice_date": "string",
-                "exporter": {"name": "", "address": "", "iec": "", "gstin": ""},
-                "importer": {"name": "", "address": "", "vat": ""},
-                "items": [{"description": "", "hs_code": "", "qty": 0, "unit": "", "unit_price": 0, "total": 0}],
+                "exporter": {"name": "string", "address": "string", "iec": "string", "gstin": "string"},
+                "importer": {"name": "string", "address": "string", "vat": "string"},
+                "items": [{"description": "string", "hs_code": "string", "qty": 0, "unit": "string", "unit_price": 0, "total": 0}],
                 "subtotal": 0,
                 "freight_charges": 0,
                 "insurance": 0,
                 "grand_total": 0,
-                "currency": "",
-                "payment_terms": "",
-                "incoterms": "",
-                "bank_details": {},
+                "currency": "string",
+                "payment_terms": "string",
+                "incoterms": "string",
+                "bank_details": {"name": "string", "address": "string", "swift": "string", "account_number": "string"},
                 "declaration": "string",
                 "_confidence": 0,
             },
             temperature=0.0,
         )
-        return parse_llm_json(result["text"], "commercial invoice generation")
+        data = parse_llm_json(result["text"], "commercial invoice generation")
+        # Safe defaults for any missing fields
+        data.setdefault("bank_details", {"name": "State Bank of India", "address": "Mumbai, India", "swift": "SBININBB", "account_number": ""})
+        data.setdefault("declaration", "We declare that the above information is true and correct. The goods are exported under LUT.")
+        data.setdefault("exporter", {"name": "", "address": "", "iec": "", "gstin": ""})
+        data.setdefault("importer", {"name": "", "address": "", "vat": ""})
+        return data
 
     async def _gen_packing_list(self, order: dict, overrides: dict, style: list) -> dict:
         try:
@@ -807,11 +817,11 @@ class DocumentGenerationAgent(BaseAgent):
         except Exception:
             system_prompt = "Generate a detailed packing list for international export."
         result = await self.llm.complete(
-            system_prompt=system_prompt,
+            system_prompt="Generate a packing list for international export. Return only JSON. No explanation.",
             user_prompt=f"Order data:\n{json.dumps(order, indent=2)}",
             output_schema={
                 "pl_number": "string",
-                "packages": [{"pkg_no": 0, "description": "", "qty": 0, "net_wt_kg": 0, "gross_wt_kg": 0, "dims_cm": ""}],
+                "packages": [{"pkg_no": 0, "description": "string", "qty": 0, "net_wt_kg": 0, "gross_wt_kg": 0, "dims_cm": "string"}],
                 "total_packages": 0,
                 "total_net_weight_kg": 0,
                 "total_gross_weight_kg": 0,

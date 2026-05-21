@@ -164,11 +164,12 @@ class WorkflowEngine:
         for step_name in self.step_order:
             step = self.steps[step_name]
 
-            # Check dependencies — ALL must be COMPLETED, else skip this step
+            # Check dependencies — COMPLETED or SKIPPED both unblock dependents
             unmet_deps = [
                 dep for dep in step.depends_on
                 if not self.step_statuses.get(dep)
-                or self.step_statuses[dep].status != StepStatus.COMPLETED
+                or self.step_statuses[dep].status
+                not in (StepStatus.COMPLETED, StepStatus.SKIPPED)
             ]
             if unmet_deps:
                 await self._emit("step.skipped", {"step": step_name, "reason": f"unmet deps: {unmet_deps}"})
@@ -212,7 +213,7 @@ class WorkflowEngine:
                 t0     = asyncio.get_event_loop().time()
                 result = await asyncio.wait_for(
                     step.run_fn(self.ctx),
-                    timeout=max(30, int(step.timeout_s))
+                    timeout=max(10, int(step.timeout_s))
                 )
                 result.latency_ms = int((asyncio.get_event_loop().time() - t0) * 1000)
                 await self._emit("step.completed", {
@@ -401,7 +402,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         from services.api.main import DocumentGenerationAgent
         import uuid as _uuid
 
-        agent     = DocumentGenerationAgent(org_id=_uuid.UUID(ctx.org_id))
+        agent      = DocumentGenerationAgent(org_id=_uuid.UUID(ctx.org_id))
         order_data = {
             "buyer":     ctx.extracted_po.get("buyer_name"),
             "country":   ctx.extracted_po.get("buyer_country"),
@@ -412,21 +413,61 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             "port":      ctx.extracted_po.get("destination_port"),
         }
 
-        invoice_r = await agent.run({"doc_type": "commercial_invoice", "order": order_data})
-        packing_r = await agent.run({"doc_type": "packing_list",       "order": order_data})
+        # Run each doc independently — one failure must not block the other
+        invoice_data = {}
+        packing_data = {}
+
+        try:
+            invoice_r    = await agent.run({"doc_type": "commercial_invoice", "order": order_data})
+            invoice_data = invoice_r["doc_data"]
+            print(f"[generate_documents] invoice OK confidence={invoice_data.get('_confidence')}")
+        except Exception as exc:
+            print(f"[generate_documents] invoice failed: {exc}")
+            invoice_data = {
+                "invoice_number": f"DRAFT-{ctx.workflow_id[:8].upper()}",
+                "invoice_date":   __import__("datetime").datetime.utcnow().strftime("%Y-%m-%d"),
+                "grand_total":    ctx.extracted_po.get("total_value", 0),
+                "currency":       ctx.extracted_po.get("currency", "USD"),
+                "payment_terms":  ctx.extracted_po.get("payment_terms", ""),
+                "incoterms":      ctx.extracted_po.get("incoterms", ""),
+                "bank_details":   {"name": "State Bank of India", "swift": "SBININBB"},
+                "declaration":    "Draft — pending review.",
+                "_confidence":    40,
+                "_draft":         True,
+            }
+
+        try:
+            packing_r    = await agent.run({"doc_type": "packing_list", "order": order_data})
+            packing_data = packing_r["doc_data"]
+            print(f"[generate_documents] packing OK confidence={packing_data.get('_confidence')}")
+        except Exception as exc:
+            print(f"[generate_documents] packing list failed: {exc}")
+            packing_data = {
+                "pl_number":             f"PL-{ctx.workflow_id[:8].upper()}",
+                "total_packages":        1,
+                "total_net_weight_kg":   0,
+                "total_gross_weight_kg": 0,
+                "total_volume_cbm":      0,
+                "_confidence":           40,
+                "_draft":                True,
+            }
 
         ctx.documents = {
-            "commercial_invoice": invoice_r["doc_data"],
-            "packing_list":       packing_r["doc_data"],
+            "commercial_invoice": invoice_data,
+            "packing_list":       packing_data,
         }
 
         doc_confidence = min(
-            float(invoice_r.get("confidence") or 95),
-            float(packing_r.get("confidence") or 95),
+            float(invoice_data.get("_confidence") or 40),
+            float(packing_data.get("_confidence") or 40),
         )
         ctx.overall_confidence = min(ctx.overall_confidence, doc_confidence)
 
-        return StepResult(status=StepStatus.COMPLETED, output=ctx.documents, confidence=ctx.overall_confidence)
+        return StepResult(
+            status=StepStatus.COMPLETED,
+            output=ctx.documents,
+            confidence=ctx.overall_confidence,
+        )
 
     async def compensate_generate_documents(ctx: WorkflowContext):
         """Rollback: delete generated document records from DB."""
@@ -473,8 +514,37 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             )
             db_workflow_id = wf_row["id"]
 
-            # 2 — Insert into orders (upsert on workflow_id to stay idempotent)
-            extracted = ctx.extracted_po
+            # 2 — Upsert buyer contact from extracted PO data
+            extracted    = ctx.extracted_po
+            buyer_name   = (extracted.get("buyer_name") or "Unknown Buyer")[:200]
+            buyer_country= (extracted.get("buyer_country") or "AE")[:2].upper()
+            buyer_wa     = ctx.raw_input.get("buyer_whatsapp") or ""
+
+            contact_row = await db.fetchrow(
+                """
+                INSERT INTO contacts (org_id, type, name, country, currency, payment_terms, whatsapp)
+                VALUES ($1, 'buyer', $2, $3, $4, $5, $6)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                _uuid.UUID(ctx.org_id), buyer_name, buyer_country,
+                (extracted.get("currency") or "USD")[:3],
+                extracted.get("payment_terms"), buyer_wa or None,
+            )
+            if contact_row is None:
+                contact_row = await db.fetchrow(
+                    "SELECT id FROM contacts WHERE org_id=$1 AND name=$2 LIMIT 1",
+                    _uuid.UUID(ctx.org_id), buyer_name,
+                )
+            if contact_row is None:
+                contact_row = await db.fetchrow(
+                    "SELECT id FROM contacts WHERE org_id=$1 LIMIT 1",
+                    _uuid.UUID(ctx.org_id),
+                )
+            buyer_id = contact_row["id"] if contact_row else None
+            print(f"[HITL] buyer contact upserted: {buyer_id}  name={buyer_name}")
+
+            # 3 — Insert into orders
             order_number = f"WA-{ctx.workflow_id[:8].upper()}"
             order_row = await db.fetchrow(
                 """
@@ -484,25 +554,18 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                     port_of_discharge, destination_country,
                     po_source, po_raw_text, workflow_id
                 )
-                VALUES (
-                    $1, $2,
-                    (SELECT id FROM contacts
-                     WHERE org_id = $1 LIMIT 1),
-                    $3, $4, $5, $6, $7, $8, $9, $10, $11
-                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 ON CONFLICT (org_id, order_number) DO UPDATE
                     SET status = EXCLUDED.status
                 RETURNING id
                 """,
-                _uuid.UUID(ctx.org_id),
-                order_number,
+                _uuid.UUID(ctx.org_id), order_number, buyer_id,
                 "awaiting_approval" if decision["requires_human"] else "documents_pending",
                 (extracted.get("currency") or "USD")[:3],
                 extracted.get("payment_terms"),
                 extracted.get("incoterms"),
                 extracted.get("destination_port"),
-                (extracted.get("buyer_country") or "AE")[:2].upper(),
-                ctx.source,
+                buyer_country, ctx.source,
                 extracted.get("raw_text") or None,
                 db_workflow_id,
             )
@@ -674,8 +737,9 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             agent        = "po_extraction_agent",
             run_fn       = step_extract_po,
             compensate_fn= compensate_extract_po,
-            max_retries  = 2,
-            timeout_s    = 45,
+            max_retries  = 1,
+            timeout_s    = int(os.getenv("PO_EXTRACT_TIMEOUT_S", 120)),
+            skip_on_error= False,
         ),
         WorkflowStep(
             name         = "validate_hs",
@@ -692,7 +756,8 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             run_fn       = step_generate_documents,
             compensate_fn= compensate_generate_documents,
             max_retries  = 1,
-            timeout_s    = 60,
+            timeout_s    = int(os.getenv("DOC_GEN_TIMEOUT_S", 180)),
+            skip_on_error= True,
             depends_on   = ["validate_hs"],
         ),
         WorkflowStep(

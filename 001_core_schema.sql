@@ -463,8 +463,15 @@ DO $$ DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['organizations','users','contacts','products',
                             'orders','documents','agent_memory','shipments'] LOOP
-    EXECUTE format(
-      'CREATE TRIGGER trg_%I_updated_at BEFORE UPDATE ON %I
-       FOR EACH ROW EXECUTE FUNCTION set_updated_at()', t, t);
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_trigger tr
+      JOIN pg_class cl ON cl.oid = tr.tgrelid
+      WHERE tr.tgname = format('trg_%s_updated_at', t)
+        AND cl.relname = t
+    ) THEN
+      EXECUTE format(
+        'CREATE TRIGGER trg_%I_updated_at BEFORE UPDATE ON %I
+         FOR EACH ROW EXECUTE FUNCTION set_updated_at()', t, t);
+    END IF;
   END LOOP;
 END $$;

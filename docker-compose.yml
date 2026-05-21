@@ -10,6 +10,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
+    container_name: api
     ports:
       - "8000:8000"
     env_file:
@@ -35,6 +36,7 @@ services:
   # ── PostgreSQL + pgvector ─────────────────────────────────
   postgres:
     image: pgvector/pgvector:pg16
+    container_name: postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-tradeos}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradeos}
@@ -55,6 +57,7 @@ services:
   # ── Redis (hot cache + rate limiting) ────────────────────
   redis:
     image: redis:7-alpine
+    container_name: redis
     ports:
       - "${REDIS_HOST_PORT:-6380}:6379"
     volumes:
@@ -70,6 +73,7 @@ services:
   # ── Kafka (event bus) ─────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
     networks:
@@ -77,6 +81,7 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
     ports:
       - "9092:9092"
     environment:
@@ -92,6 +97,7 @@ services:
   # ── Temporal (durable workflow execution) ─────────────────
   temporal:
     image: temporalio/auto-setup:1.22
+    container_name: temporal
     ports:
       - "7233:7233"
     environment:
@@ -108,6 +114,7 @@ services:
 
   temporal-ui:
     image: temporalio/ui:2.21
+    container_name: temporal-ui
     ports:
       - "8088:8080"
     environment:
@@ -120,6 +127,7 @@ services:
   # ── PaddleOCR Service ─────────────────────────────────────
   ocr:
     image: paddlepaddle/paddle:2.6.0
+    container_name: ocr
     command: >
       python -m uvicorn ocr_service:app --host 0.0.0.0 --port 8100
     ports:
@@ -133,6 +141,7 @@ services:
   # ── Local LLM — Primary Provider (Ollama + qwen2.5:3b) ──────
   ollama:
     image: ollama/ollama:0.3.12
+    container_name: ollama
     ports:
       - "11434:11434"
     volumes:
@@ -150,6 +159,7 @@ services:
   # ── WhatsApp Webhook Proxy (ngrok in dev) ─────────────────
   ngrok:
     image: ngrok/ngrok:latest
+    container_name: ngrok
     command: http api:8000 --domain=${NGROK_DOMAIN}
     environment:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
