@@ -310,7 +310,8 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
     # ── STEP IMPLEMENTATIONS ──────────────────────────────
 
     async def step_extract_po(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import POExtractionAgent, DocumentIntelligenceEngine
+        from services.agents.po_extraction import POExtractionAgent
+        from services.api.main import DocumentIntelligenceEngine
         import uuid as _uuid
 
         agent    = POExtractionAgent(org_id=_uuid.UUID(ctx.org_id))
@@ -350,7 +351,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         ctx.extracted_po = {}
 
     async def step_validate_hs(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import HSCodeValidationAgent
+        from services.agents.hs_validation import HSCodeValidationAgent
         import uuid as _uuid
 
         items = ctx.extracted_po.get("items", [])
@@ -399,7 +400,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         return StepResult(status=StepStatus.COMPLETED, output=hs_data, confidence=confidence)
 
     async def step_generate_documents(ctx: WorkflowContext) -> StepResult:
-        from services.api.main import DocumentGenerationAgent
+        from services.agents.doc_generation import DocumentGenerationAgent
         import uuid as _uuid
 
         agent      = DocumentGenerationAgent(org_id=_uuid.UUID(ctx.org_id))

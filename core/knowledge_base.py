@@ -235,7 +235,8 @@ class KnowledgeBase:
     async def seed(cls, pool: asyncpg.Pool, org_id: str):
         """
         Idempotent: insert all FAQ chunks with embeddings on startup.
-        Skips rows that already exist (ON CONFLICT DO NOTHING on key + org_id).
+        Safely checks for existing records before handling insertions to bypass
+        schema constraint format variations.
         """
         print(f"[KB] seeding {len(FAQ_CHUNKS)} FAQ chunks for org {org_id}…")
 
@@ -244,9 +245,23 @@ class KnowledgeBase:
         embeddings = await LocalEmbedder.embed_batch(questions)
 
         async with pool.acquire() as db:
+            # Step 1: Query existing keys for this org to guarantee idempotency
+            existing_rows = await db.fetch(
+                """
+                SELECT key FROM agent_memory 
+                WHERE org_id = $1 AND agent_name = $2 AND memory_type = $3 AND scope_type = $4
+                """,
+                org_id, cls.AGENT_NAME, cls.MEMORY_TYPE, cls.SCOPE_TYPE
+            )
+            existing_keys = {row["key"] for row in existing_rows}
+
             inserted = 0
+            # Step 2: Only insert chunks that are completely missing
             for (key, question, answer), embedding in zip(FAQ_CHUNKS, embeddings):
-                result = await db.execute(
+                if key in existing_keys:
+                    continue
+
+                await db.execute(
                     """
                     INSERT INTO agent_memory (
                         org_id, agent_name, memory_type,
@@ -254,8 +269,6 @@ class KnowledgeBase:
                         confidence, source, embedding
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
-                    ON CONFLICT (org_id, agent_name, memory_type, scope_type, key)
-                    DO NOTHING
                     """,
                     org_id,
                     cls.AGENT_NAME,
@@ -267,8 +280,7 @@ class KnowledgeBase:
                     "seed",
                     json.dumps(embedding),   # pgvector accepts JSON array string
                 )
-                if result == "INSERT 0 1":
-                    inserted += 1
+                inserted += 1
 
         print(f"[KB] seeded {inserted} new chunks ({len(FAQ_CHUNKS) - inserted} already existed)")
 

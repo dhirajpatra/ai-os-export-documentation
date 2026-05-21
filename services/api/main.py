@@ -28,100 +28,162 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+# ── Updated Core Config Imports ──
+from core.config import (
+    cfg, 
+    LLMRouter, 
+    parse_llm_json, 
+    OrgContext, 
+    DocumentIntelligenceEngine, 
+    HITLOrchestrator
+)
+
+# ── Import Distributed Subsystems ──
+from services.agents.po_extraction import POExtractionAgent
+from services.agents.hs_validation import HSCodeValidationAgent
+from services.agents.doc_generation import DocumentGenerationAgent
+from services.integrations.whatsapp import WhatsAppService
+from services.workflows.po_workflow import KillerDemoWorkflow
+
 
 # ─────────────────────────────────────────────
-# CONFIG
+# DOCUMENT INTELLIGENCE ENGINE
+# Thin orchestration layer — all OCR logic lives
+# in services/ocr_service.py for clean separation.
 # ─────────────────────────────────────────────
 
-class Settings:
-    APP_NAME = "TradeOS API"
-    VERSION  = "0.1.0"
-
-    # Database — read from env (falls back to local dev default)
-    DATABASE_URL = os.getenv(
-        "DATABASE_URL",
-        f"postgresql+asyncpg://{os.getenv('POSTGRES_USER','tradeos')}:{os.getenv('POSTGRES_PASSWORD','tradeos')}@{os.getenv('POSTGRES_HOST','localhost')}:{os.getenv('POSTGRES_PORT','5432')}/{os.getenv('POSTGRES_DB','tradeos')}",
-    )
-
-    # LLM Provider chain (tried in order, with fallback)
-    # Priority 1→6: Local Ollama → Groq → OpenAI → xAI Grok → Anthropic → Gemini
-    # Local Ollama (qwen2.5:3b) is always tried first — zero cost, zero latency,
-    # and fully private. Cloud providers kick in only when Ollama is unavailable.
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:3b")
-
-    LLM_CHAIN = [
-        {"provider": "groq",      "model": "llama-3.3-70b-versatile",                "priority": 1},
-        {"provider": "gemini",    "model": "gemini-2.5-flash-preview-04-17",         "priority": 2},
-        {"provider": "openai",    "model": "gpt-4o",                                 "priority": 3},
-        {"provider": "anthropic", "model": "claude-sonnet-4-6",                      "priority": 4},
-        {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"), "priority": 5},
-    ]
-
-    # Workflow
-    TEMPORAL_HOST   = os.getenv("TEMPORAL_HOST",   "localhost:7233")
-    # NOTE: Kafka removed for MVP — use Redis pub/sub or Temporal signals for eventing
-
-    # Storage
-    S3_BUCKET = os.getenv("S3_BUCKET", "tradeos-documents")
-
-    # WhatsApp — all values from env
-    WHATSAPP_PROVIDER     = os.getenv("WHATSAPP_PROVIDER",     "meta")  # meta | twilio
-    WHATSAPP_API_URL      = os.getenv("WHATSAPP_API_URL",      "https://graph.facebook.com/v18.0")
-    WHATSAPP_TOKEN        = os.getenv("WHATSAPP_TOKEN",        "")
-    WHATSAPP_PHONE_ID     = os.getenv("WHATSAPP_PHONE_ID",     "")
-    WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "")
-    WHATSAPP_BUSINESS_ID  = os.getenv("WHATSAPP_BUSINESS_ID",  "")
-    TWILIO_ACCOUNT_SID    = os.getenv("TWILIO_ACCOUNT_SID",    "")
-    TWILIO_AUTH_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN",     "")
-    TWILIO_PHONE_NUMBER   = os.getenv("TWILIO_PHONE_NUMBER",   "")
-
-    # Auth
-    JWT_SECRET      = os.getenv("JWT_SECRET")
-    JWT_EXPIRE_MINS = os.getenv("JWT_EXPIRE_MINS", "480")
-
-    # HITL — thresholds aligned with architecture spec:
-    #   >=92% + no high flags → auto-approve
-    #   70-91%                → soft review (optional 30-second check)
-    #   <70%  OR critical flag → mandatory human review
-    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "92.0"))
-    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "70.0"))
-    APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS",     "4"))
-
-
-cfg = Settings()
-
-
-def parse_llm_json(text: str, context: str) -> Any:
+class DocumentIntelligenceEngine:
     """
-    Parse provider output that should be JSON, tolerating markdown fences
-    or short explanatory text around the object.
+    Orchestrates the full document intelligence pipeline.
+    Actual OCR, table detection, and LLM extraction are
+    delegated to core.ocr_service — import from there directly
+    when you need individual stages.
     """
-    cleaned = (text or "").strip()
-    if not cleaned:
-        raise ValueError(f"{context}: LLM returned an empty response")
 
-    if cleaned.startswith("```"):
-        cleaned = cleaned.removeprefix("```json").removeprefix("```").strip()
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
+    @staticmethod
+    async def extract_from_file(file_bytes: bytes, mime_type: str) -> dict:
+        """
+        Full pipeline: OCR → table detection → stamp detection → LLM extraction.
+        Returns: {raw_text, tables, stamps, extracted}
+        Raises RuntimeError if text extraction fails entirely.
+        """
+        from core.ocr_service import full_document_pipeline
+        return await full_document_pipeline(file_bytes, mime_type)
 
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        object_start = cleaned.find("{")
-        array_start = cleaned.find("[")
-        starts = [idx for idx in (object_start, array_start) if idx != -1]
-        if not starts:
-            raise ValueError(f"{context}: LLM response was not JSON: {cleaned[:200]}")
 
-        start = min(starts)
-        end = max(cleaned.rfind("}"), cleaned.rfind("]"))
-        if end <= start:
-            raise ValueError(f"{context}: LLM response contained incomplete JSON: {cleaned[:200]}")
+# ─────────────────────────────────────────────
+# HITL ORCHESTRATOR
+# ─────────────────────────────────────────────
 
-        return json.loads(cleaned[start:end + 1])
+class HITLOrchestrator:
+    """
+    Human-In-The-Loop decision engine.
+    Determines: auto-approve | flag for human | block.
+    """
 
+    @staticmethod
+    def evaluate(step_name: str, confidence: float, risk_flags: list) -> dict:
+        critical_flags = [f for f in risk_flags if f.get("severity") == "critical"]
+        high_flags     = [f for f in risk_flags if f.get("severity") == "high"]
+
+        if critical_flags:
+            return {
+                "decision": "block",
+                "reason":   f"Critical flags: {[f['message'] for f in critical_flags]}",
+                "requires_human": True,
+            }
+
+        if confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
+            return {
+                "decision": "auto_approve",
+                "reason":   f"Confidence {confidence:.1f}% above threshold, no high-severity flags",
+                "requires_human": False,
+            }
+
+        if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
+            return {
+                "decision": "require_human",
+                "reason":   (
+                    f"Confidence {confidence:.1f}% below threshold" if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
+                    else f"High-severity flags: {[f['message'] for f in high_flags]}"
+                ),
+                "requires_human": True,
+            }
+
+        return {
+            "decision": "soft_review",
+            "reason":   "Moderate confidence — flagging for optional review",
+            "requires_human": True,
+        }
+
+    @staticmethod
+    def compute_diff(before: dict, after: dict) -> list[dict]:
+        """Field-level diff for the approval UI."""
+        diffs = []
+        all_keys = set(before.keys()) | set(after.keys())
+        for key in all_keys:
+            b, a = before.get(key), after.get(key)
+            if b != a:
+                diffs.append({"field": key, "before": b, "after": a})
+        return diffs
+
+
+# ─────────────────────────────────────────────
+# PYDANTIC INBOUND SCHEMAS
+# ─────────────────────────────────────────────
+
+class POIngestRequest(BaseModel):
+    """Ingest a purchase order from any source."""
+    source: str = Field(..., description="whatsapp | email | portal | manual")
+    raw_text: str | None = None
+    buyer_contact_id: uuid.UUID | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class ExtractionResult(BaseModel):
+    buyer_name: str | None
+    buyer_country: str | None
+    items: list[dict]
+    currency: str
+    payment_terms: str | None
+    destination_port: str | None
+    incoterms: str | None
+    delivery_date: str | None
+    special_instructions: str | None
+    confidence: float
+    warnings: list[str] = []
+
+
+class DocumentGenerationRequest(BaseModel):
+    order_id: uuid.UUID
+    doc_types: list[str]
+    overrides: dict = Field(default_factory=dict)
+
+
+class ApprovalAction(BaseModel):
+    action: str = Field(..., pattern="^(approve|reject|request_changes)$")
+    note: str | None = None
+    field_overrides: dict = Field(default_factory=dict)
+
+
+class WhatsAppWebhookPayload(BaseModel):
+    object: str
+    entry: list[dict]
+
+
+class MemoryUpsertRequest(BaseModel):
+    agent_name: str
+    memory_type: str
+    scope_type: str
+    scope_id: uuid.UUID | None
+    key: str
+    value: Any
+    confidence: float = 50.0
+
+
+# ─────────────────────────────────────────────
+# README RENDER GENERATOR
+# ─────────────────────────────────────────────
 
 def render_readme_html() -> str:
     return f"""<!doctype html>
@@ -223,1053 +285,7 @@ def render_readme_html() -> str:
 
 
 # ─────────────────────────────────────────────
-# PYDANTIC MODELS
-# ─────────────────────────────────────────────
-
-class OrgContext(BaseModel):
-    org_id: uuid.UUID
-    user_id: uuid.UUID
-    role: str
-
-
-class POIngestRequest(BaseModel):
-    """Ingest a purchase order from any source."""
-    source: str = Field(..., description="whatsapp | email | portal | manual")
-    raw_text: str | None = None
-    buyer_contact_id: uuid.UUID | None = None
-    metadata: dict = Field(default_factory=dict)
-
-
-class ExtractionResult(BaseModel):
-    buyer_name: str | None
-    buyer_country: str | None
-    items: list[dict]           # [{description, quantity, unit, unit_price, hs_code}]
-    currency: str
-    payment_terms: str | None
-    destination_port: str | None
-    incoterms: str | None
-    delivery_date: str | None
-    special_instructions: str | None
-    confidence: float
-    warnings: list[str] = []
-
-
-class DocumentGenerationRequest(BaseModel):
-    order_id: uuid.UUID
-    doc_types: list[str]        # ["commercial_invoice", "packing_list", ...]
-    overrides: dict = Field(default_factory=dict)
-
-
-class ApprovalAction(BaseModel):
-    action: str = Field(..., pattern="^(approve|reject|request_changes)$")
-    note: str | None = None
-    field_overrides: dict = Field(default_factory=dict)  # for partial approval
-
-
-class WhatsAppWebhookPayload(BaseModel):
-    object: str
-    entry: list[dict]
-
-
-class MemoryUpsertRequest(BaseModel):
-    agent_name: str
-    memory_type: str
-    scope_type: str
-    scope_id: uuid.UUID | None
-    key: str
-    value: Any
-    confidence: float = 50.0
-
-
-# ─────────────────────────────────────────────
-# LLM ROUTER — provider-agnostic
-# ─────────────────────────────────────────────
-
-class LLMRouter:
-    """
-    Tries providers in priority order.
-    Falls back automatically on error or low confidence.
-    NEVER couple business logic to a specific model.
-    """
-
-    @staticmethod
-    async def complete(
-        system_prompt: str,
-        user_prompt: str,
-        output_schema: dict | None = None,
-        max_tokens: int = 2000,
-        temperature: float = 0.1,
-    ) -> dict:
-        errors = []
-        for provider_cfg in sorted(cfg.LLM_CHAIN, key=lambda x: x["priority"]):
-            try:
-                LLMRouter._ensure_provider_configured(provider_cfg)
-                result = await LLMRouter._call_provider(
-                    provider_cfg, system_prompt, user_prompt,
-                    output_schema, max_tokens, temperature
-                )
-                result["provider_used"] = provider_cfg["provider"]
-                return result
-            except Exception as e:
-                errors.append(f"{provider_cfg['provider']}: {e}")
-                continue
-        raise RuntimeError(f"All LLM providers failed: {errors}")
-
-    @staticmethod
-    def _env(name: str, default: str = "") -> str:
-        return os.getenv(name, default).strip().strip("\"'")
-
-    @staticmethod
-    def _looks_configured(value: str) -> bool:
-        lowered = value.strip().lower()
-        return bool(lowered) and lowered not in {"your key", "your_key", "change-me", "changeme"}
-
-    @staticmethod
-    def _ensure_provider_configured(provider_cfg: dict) -> None:
-        provider = provider_cfg["provider"]
-        # local Ollama is always considered "configured" — reachability is validated
-        # at call time; a connection error will trigger fallback automatically.
-        if provider == "local":
-            return
-        if provider == "openai" and not LLMRouter._looks_configured(LLMRouter._env("OPENAI_API_KEY")):
-            raise ValueError("OPENAI_API_KEY is not configured")
-        if provider == "anthropic" and not LLMRouter._looks_configured(LLMRouter._env("ANTHROPIC_API_KEY")):
-            raise ValueError("ANTHROPIC_API_KEY is not configured")
-        if provider == "gemini" and not LLMRouter._looks_configured(LLMRouter._env("GEMINI_API_KEY")):
-            raise ValueError("GEMINI_API_KEY is not configured")
-        if provider == "groq":
-            # Supports GROQ_API_KEY or XAI_API_KEY (gsk_ prefix = Groq key)
-            groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
-            if not LLMRouter._looks_configured(groq_key):
-                raise ValueError("GROQ_API_KEY / XAI_API_KEY is not configured")
-            if not groq_key.startswith("gsk_"):
-                raise ValueError("GROQ key must start with gsk_")
-
-    @staticmethod
-    async def _call_provider(
-        provider_cfg: dict,
-        system_prompt: str,
-        user_prompt: str,
-        output_schema: dict | None,
-        max_tokens: int,
-        temperature: float,
-    ) -> dict:
-        provider = provider_cfg["provider"]
-        model    = provider_cfg["model"]
-
-        if output_schema:
-            user_prompt += (
-                "\n\nRespond ONLY with valid JSON matching this schema:"
-                f"\n{json.dumps(output_schema, indent=2)}"
-            )
-
-        if provider == "openai":
-            return await LLMRouter._openai(model, system_prompt, user_prompt, max_tokens, temperature)
-        elif provider == "groq":
-            return await LLMRouter._groq(model, system_prompt, user_prompt, max_tokens, temperature)
-        elif provider == "grok":
-            return await LLMRouter._grok(model, system_prompt, user_prompt, max_tokens, temperature)
-        elif provider == "anthropic":
-            return await LLMRouter._anthropic(model, system_prompt, user_prompt, max_tokens, temperature)
-        elif provider == "gemini":
-            return await LLMRouter._gemini(model, system_prompt, user_prompt, max_tokens, temperature)
-        elif provider == "local":
-            return await LLMRouter._local(model, system_prompt, user_prompt, max_tokens, temperature)
-        else:
-            raise ValueError(f"Unknown provider: {provider}")
-
-    @staticmethod
-    async def _anthropic(model, system, user, max_tokens, temperature) -> dict:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": LLMRouter._env("ANTHROPIC_API_KEY"),
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "system": system,
-                    "messages": [{"role": "user", "content": user}],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"text": data["content"][0]["text"]}
-
-    @staticmethod
-    async def _openai(model, system, user, max_tokens, temperature) -> dict:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {LLMRouter._env('OPENAI_API_KEY')}"},
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user",   "content": user},
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"text": data["choices"][0]["message"]["content"]}
-
-    @staticmethod
-    async def _groq(model, system, user, max_tokens, temperature) -> dict:
-        base_url = (LLMRouter._env("GROQ_BASE_URL") or LLMRouter._env("XAI_BASE_URL") or "https://api.groq.com/openai/v1").rstrip("/")
-        groq_key = LLMRouter._env("GROQ_API_KEY") or LLMRouter._env("XAI_API_KEY")
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {groq_key}"},
-                json={
-                    "model": LLMRouter._env("GROQ_MODEL", model),
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user",   "content": user},
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"text": data["choices"][0]["message"]["content"]}
-
-    @staticmethod
-    async def _grok(model, system, user, max_tokens, temperature) -> dict:
-        base_url = LLMRouter._env("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {LLMRouter._env('XAI_API_KEY')}"},
-                json={
-                    "model": LLMRouter._env("XAI_MODEL", model),
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user",   "content": user},
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"text": data["choices"][0]["message"]["content"]}
-
-    @staticmethod
-    async def _gemini(model, system, user, max_tokens, temperature) -> dict:
-        # Allow env override of model name
-        resolved_model = LLMRouter._env("GEMINI_MODEL") or model
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{resolved_model}:generateContent",
-                params={"key": LLMRouter._env("GEMINI_API_KEY")},
-                json={
-                    "contents": [{"parts": [{"text": f"{system}\n\n{user}"}]}],
-                    "generationConfig": {"maxOutputTokens": max_tokens, "temperature": temperature},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return {"text": data["candidates"][0]["content"]["parts"][0]["text"]}
-
-    @staticmethod
-    async def _local(model, system, user, max_tokens, temperature) -> dict:
-        # OLLAMA_BASE_URL defaults to the Docker service name so this works
-        # inside the compose network. Override to http://localhost:11434 for
-        # local dev outside Docker.
-        base_url = LLMRouter._env("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-        # OLLAMA_MODEL in env always wins over whatever the chain passed in
-        resolved_model = LLMRouter._env("OLLAMA_MODEL") or model
-        async with httpx.AsyncClient(timeout=180) as client:
-            resp = await client.post(
-                f"{base_url}/api/chat",
-                json={
-                    "model": resolved_model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user",   "content": user},
-                    ],
-                    "stream": False,
-                    "options": {"num_predict": max_tokens, "temperature": temperature},
-                },
-            )
-            resp.raise_for_status()
-            return {"text": resp.json()["message"]["content"]}
-
-
-
-    @staticmethod
-    async def classify_intent(text: str) -> str:
-        """
-        Classify a WhatsApp text message using the cloud LLM chain.
-        Returns: "purchase_order" | "query" | "complaint" | "greeting" | "ignore"
-
-        Uses cloud LLM (Groq → Gemini → OpenAI) for accuracy.
-        Only called for msg_type == "text". PDFs skip this and go directly to workflow.
-        Defaults to "purchase_order" on any failure so real orders are never dropped.
-        """
-        system = (
-            "You are a WhatsApp message classifier for an international seafood and "
-            "agricultural export company. Classify the message into exactly one category:\n"
-            "- purchase_order : buyer wants to place or discuss a new order "
-            "(mentions quantities, prices, goods, delivery, payment terms)\n"
-            "- query          : asking about shipment status, documents, pricing, "
-            "products, certifications, lead times, or trade processes\n"
-            "- complaint      : expressing dissatisfaction about quality, delivery, "
-            "service, or a past transaction\n"
-            "- greeting       : hello, good morning, hi, thanks, casual chat with "
-            "no specific trade request\n"
-            "- ignore         : spam, test messages, or completely unrelated content\n"
-            "Reply with ONLY the category word. No explanation. No punctuation."
-        )
-        try:
-            result = await LLMRouter.complete(
-                system_prompt=system,
-                user_prompt=text[:500],
-                max_tokens=8,
-                temperature=0.0,
-            )
-            raw = result.get("text", "").strip().lower().rstrip(".")
-            valid = ("purchase_order", "query", "complaint", "greeting", "ignore")
-            if raw in valid:
-                return raw
-            for v in valid:
-                if v in raw:
-                    return v
-            print(f"[Intent] unexpected response '{raw}' — defaulting to purchase_order")
-            return "purchase_order"
-        except Exception as exc:
-            print(f"[Intent] classification failed ({exc}) — defaulting to purchase_order")
-            return "purchase_order"
-
-# ─────────────────────────────────────────────
-# AGENT BASE
-# ─────────────────────────────────────────────
-
-class BaseAgent:
-    """All agents inherit from here. Stateless. LLM-agnostic."""
-
-    name: str = "base_agent"
-
-    def __init__(self, org_id: uuid.UUID, db=None, memory_store=None):
-        self.org_id       = org_id
-        self.db           = db
-        self.memory       = memory_store
-        self.llm          = LLMRouter()
-
-    async def run(self, input_data: dict) -> dict:
-        raise NotImplementedError
-
-    async def _remember(self, key: str, value: Any, memory_type: str,
-                        scope_type: str = "org", scope_id: uuid.UUID | None = None,
-                        confidence: float = 80.0):
-        """Store observation in agent memory layer."""
-        # In production: upsert to agent_memory table + update embedding
-        pass
-
-    async def _recall(self, query: str, memory_type: str | None = None, top_k: int = 5) -> list[dict]:
-        """Semantic recall from agent memory."""
-        # In production: vector similarity search on agent_memory table
-        return []
-
-    def _emit_event(self, event_type: str, payload: dict):
-        """Emit event (MVP: fire-and-forget log; post-MVP: Redis pub/sub or Temporal signal)."""
-        # TODO post-MVP: push to Redis channel or Temporal signal
-        pass
-
-
-# ─────────────────────────────────────────────
-# DOCUMENT INTELLIGENCE ENGINE
-# Thin orchestration layer — all OCR logic lives
-# in services/ocr_service.py for clean separation.
-# ─────────────────────────────────────────────
-
-class DocumentIntelligenceEngine:
-    """
-    Orchestrates the full document intelligence pipeline.
-    Actual OCR, table detection, and LLM extraction are
-    delegated to core.ocr_service — import from there directly
-    when you need individual stages.
-    """
-
-    @staticmethod
-    async def extract_from_file(file_bytes: bytes, mime_type: str) -> dict:
-        """
-        Full pipeline: OCR → table detection → stamp detection → LLM extraction.
-        Returns: {raw_text, tables, stamps, extracted}
-        Raises RuntimeError if text extraction fails entirely.
-        """
-        from core.ocr_service import full_document_pipeline
-        return await full_document_pipeline(file_bytes, mime_type)
-
-
-# ─────────────────────────────────────────────
-# AGENTS
-# ─────────────────────────────────────────────
-
-class POExtractionAgent(BaseAgent):
-    name = "po_extraction_agent"
-
-    SYSTEM_PROMPT = """
-You are an expert in international trade purchase orders.
-Extract structured data from any PO format: PDF, WhatsApp message, email body, or scanned image.
-Handle Arabic, English, Hindi. Normalize all values.
-Always output confidence score 0-100 per field and overall.
-Flag ambiguous fields as warnings, do not hallucinate.
-"""
-
-    async def run(self, input_data: dict) -> dict:
-        source   = input_data["source"]       # "whatsapp" | "email" | "file"
-        raw_text = input_data.get("raw_text", "")
-
-        # Pull versioned system prompt from registry; fall back to inline if missing
-        try:
-            from core.prompt_registry import PromptRegistry
-            prompt_rec  = PromptRegistry.get("po_extraction_agent", "extract_purchase_order")
-            system_prompt = prompt_rec.system_prompt
-        except Exception:
-            system_prompt = self.SYSTEM_PROMPT
-
-        # Recall: does this buyer have patterns we've seen before?
-        buyer_memories = []
-        if input_data.get("buyer_contact_id"):
-            buyer_memories = await self._recall(
-                query="buyer purchase order patterns",
-                memory_type="customer_preference",
-            )
-
-        memory_context = (
-            f"\nKnown buyer patterns: {json.dumps(buyer_memories)}" if buyer_memories else ""
-        )
-
-        result = await self.llm.complete(
-            system_prompt=system_prompt + memory_context,
-            user_prompt=f"Source: {source}\n\nContent:\n{raw_text}",
-            output_schema={
-                "buyer_name": "string",
-                "buyer_country": "string",
-                "items": [{
-                    "description": "string",
-                    "quantity": 0,
-                    "unit": "string",
-                    "unit_price": 0,
-                    "hs_code": "string",
-                    "hs_confidence": 0,
-                }],
-                "currency": "string",
-                "payment_terms": "string",
-                "destination_port": "string",
-                "incoterms": "string",
-                "delivery_date": "string",
-                "special_instructions": "string",
-                "confidence": 0,
-                "warnings": [],
-            },
-            temperature=0.0,
-        )
-
-        extracted = parse_llm_json(result["text"], "PO extraction")
-
-        # Learn: update buyer memory with this pattern
-        await self._remember(
-            key="last_po_pattern",
-            value={"items": extracted.get("items", []), "currency": extracted.get("currency")},
-            memory_type="customer_preference",
-            scope_type="contact",
-        )
-
-        self._emit_event("po.extracted", {
-            "org_id": str(self.org_id),
-            "confidence": extracted.get("confidence"),
-            "item_count": len(extracted.get("items", [])),
-        })
-
-        return {"status": "ok", "data": extracted, "provider": result.get("provider_used")}
-
-
-class HSCodeValidationAgent(BaseAgent):
-    name = "hs_validation_agent"
-
-    SYSTEM_PROMPT = """
-You are an international trade compliance expert specializing in HS (Harmonized System) codes.
-Validate HS codes against the official WCO schedule.
-For each code: verify description match, check for country-specific restrictions,
-flag prohibited/restricted categories, suggest corrections if wrong.
-Consider both the 6-digit WCO code and country-specific extensions (8-digit for India, UAE).
-"""
-
-    async def run(self, input_data: dict) -> dict:
-        items            = input_data["items"]
-        from_country     = input_data.get("from_country", "IN")
-        to_country       = input_data.get("to_country", "AE")
-
-        # Pull versioned system prompt from registry; fall back to inline if missing
-        try:
-            from core.prompt_registry import PromptRegistry
-            prompt_rec    = PromptRegistry.get("hs_validation_agent", "validate_hs_codes")
-            system_prompt = prompt_rec.system_prompt
-        except Exception:
-            system_prompt = self.SYSTEM_PROMPT
-
-        # Recall previously validated HS codes for this org
-        cached_codes = await self._recall(
-            query=" ".join(i.get("description", "") for i in items),
-            memory_type="hs_code_learned",
-        )
-
-        # Single compact schema — works for all providers including small Ollama models.
-        # Heavy optional fields (dgft_schedule, import_duty_destination, restrictions)
-        # are omitted: qwen2.5:3b skips them and the workflow doesn't use them.
-        output_schema = {
-            "validations": [{
-                "original_description": "string",
-                "original_hs_code":     "string",
-                "validated_hs_code":    "string",
-                "is_valid":             True,
-                "confidence":           90,
-                "correction_reason":    "string",
-            }],
-            "overall_clearance": True,
-            "flags": [],
-        }
-
-        result = await self.llm.complete(
-            system_prompt=system_prompt,
-            user_prompt=(
-                f"Validate these items for export from {from_country} to {to_country}:\n"
-                f"{json.dumps(items, indent=2)}\n"
-                f"Previously validated codes for this org: {json.dumps(cached_codes)}"
-            ),
-            output_schema=output_schema,
-            temperature=0.0,
-        )
-
-        data = parse_llm_json(result["text"], "HS code validation")
-
-        # Learn validated codes
-        for v in data.get("validations", []):
-            if v.get("is_valid") and v.get("confidence", 0) > 85:
-                await self._remember(
-                    key=v["validated_hs_code"],
-                    value={"description": v["original_description"], "route": f"{from_country}-{to_country}"},
-                    memory_type="hs_code_learned",
-                    confidence=v["confidence"],
-                )
-
-        return {"status": "ok", "data": data}
-
-
-class DocumentGenerationAgent(BaseAgent):
-    name = "doc_generation_agent"
-
-    async def run(self, input_data: dict) -> dict:
-        doc_type  = input_data["doc_type"]
-        order     = input_data["order"]
-        overrides = input_data.get("overrides", {})
-
-        # Pull versioned system prompt from registry for this doc type
-        _prompt_key_map = {
-            "commercial_invoice": "generate_commercial_invoice",
-            "packing_list":       "generate_packing_list",
-        }
-
-        # Recall: does this buyer have a preferred invoice format?
-        style_memory = await self._recall(
-            query="invoice format preference",
-            memory_type="invoice_style",
-        )
-
-        generators = {
-            "commercial_invoice": self._gen_commercial_invoice,
-            "packing_list":       self._gen_packing_list,
-            "certificate_of_origin": self._gen_coo,
-            "bill_of_lading":     self._gen_bl_draft,
-        }
-
-        if doc_type not in generators:
-            raise ValueError(f"Unsupported doc type: {doc_type}")
-
-        doc_data  = await generators[doc_type](order, overrides, style_memory)
-
-        return {
-            "status":      "ok",
-            "doc_type":    doc_type,
-            "doc_data":    doc_data,
-            "confidence":  doc_data.get("_confidence", 95),
-        }
-
-    async def _gen_commercial_invoice(self, order: dict, overrides: dict, style: list) -> dict:
-        try:
-            from core.prompt_registry import PromptRegistry
-            system_prompt = PromptRegistry.get("doc_generation_agent", "generate_commercial_invoice").system_prompt
-        except Exception:
-            system_prompt = (
-                "Generate a complete commercial invoice for international export. "
-                "Follow UNCTAD/ICC standards. Include all mandatory fields for LC documentation. "
-                "Apply Indian GST zero-rating for exports (LUT). "
-                "Format amounts correctly for the destination country."
-            )
-        result = await self.llm.complete(
-            system_prompt=(
-                "Generate a complete commercial invoice for international export. "
-                "Follow UNCTAD/ICC standards. Include all mandatory fields for LC documentation. "
-                "Apply Indian GST zero-rating for exports (LUT). "
-                "Return ONLY valid JSON, no explanation."
-            ),
-            user_prompt=(
-                f"Generate commercial invoice for:\n{json.dumps(order, indent=2)}"
-                f"\nOverrides: {json.dumps(overrides)}"
-            ),
-            output_schema={
-                "invoice_number": "string",
-                "invoice_date": "string",
-                "exporter": {"name": "string", "address": "string", "iec": "string", "gstin": "string"},
-                "importer": {"name": "string", "address": "string", "vat": "string"},
-                "items": [{"description": "string", "hs_code": "string", "qty": 0, "unit": "string", "unit_price": 0, "total": 0}],
-                "subtotal": 0,
-                "freight_charges": 0,
-                "insurance": 0,
-                "grand_total": 0,
-                "currency": "string",
-                "payment_terms": "string",
-                "incoterms": "string",
-                "bank_details": {"name": "string", "address": "string", "swift": "string", "account_number": "string"},
-                "declaration": "string",
-                "_confidence": 0,
-            },
-            temperature=0.0,
-        )
-        data = parse_llm_json(result["text"], "commercial invoice generation")
-        # Safe defaults for any missing fields
-        data.setdefault("bank_details", {"name": "State Bank of India", "address": "Mumbai, India", "swift": "SBININBB", "account_number": ""})
-        data.setdefault("declaration", "We declare that the above information is true and correct. The goods are exported under LUT.")
-        data.setdefault("exporter", {"name": "", "address": "", "iec": "", "gstin": ""})
-        data.setdefault("importer", {"name": "", "address": "", "vat": ""})
-        return data
-
-    async def _gen_packing_list(self, order: dict, overrides: dict, style: list) -> dict:
-        try:
-            from core.prompt_registry import PromptRegistry
-            system_prompt = PromptRegistry.get("doc_generation_agent", "generate_packing_list").system_prompt
-        except Exception:
-            system_prompt = "Generate a detailed packing list for international export."
-        result = await self.llm.complete(
-            system_prompt="Generate a packing list for international export. Return only JSON. No explanation.",
-            user_prompt=f"Order data:\n{json.dumps(order, indent=2)}",
-            output_schema={
-                "pl_number": "string",
-                "packages": [{"pkg_no": 0, "description": "string", "qty": 0, "net_wt_kg": 0, "gross_wt_kg": 0, "dims_cm": "string"}],
-                "total_packages": 0,
-                "total_net_weight_kg": 0,
-                "total_gross_weight_kg": 0,
-                "total_volume_cbm": 0,
-                "_confidence": 0,
-            },
-            temperature=0.0,
-        )
-        return parse_llm_json(result["text"], "packing list generation")
-
-    async def _gen_coo(self, order: dict, overrides: dict, style: list) -> dict:
-        result = await self.llm.complete(
-            system_prompt="Generate a Certificate of Origin for international export.",
-            user_prompt=f"Order data:\n{json.dumps(order, indent=2)}",
-            output_schema={"_confidence": 0},
-            temperature=0.0,
-        )
-        return parse_llm_json(result["text"], "certificate of origin generation")
-
-    async def _gen_bl_draft(self, order: dict, overrides: dict, style: list) -> dict:
-        return {"_confidence": 90, "status": "draft"}
-
-
-class HITLOrchestrator:
-    """
-    Human-In-The-Loop decision engine.
-    Determines: auto-approve | flag for human | block.
-    """
-
-    @staticmethod
-    def evaluate(step_name: str, confidence: float, risk_flags: list) -> dict:
-        critical_flags = [f for f in risk_flags if f.get("severity") == "critical"]
-        high_flags     = [f for f in risk_flags if f.get("severity") == "high"]
-
-        if critical_flags:
-            return {
-                "decision": "block",
-                "reason":   f"Critical flags: {[f['message'] for f in critical_flags]}",
-                "requires_human": True,
-            }
-
-        if confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
-            return {
-                "decision": "auto_approve",
-                "reason":   f"Confidence {confidence:.1f}% above threshold, no high-severity flags",
-                "requires_human": False,
-            }
-
-        if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
-            return {
-                "decision": "require_human",
-                "reason":   (
-                    f"Confidence {confidence:.1f}% below threshold" if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
-                    else f"High-severity flags: {[f['message'] for f in high_flags]}"
-                ),
-                "requires_human": True,
-            }
-
-        return {
-            "decision": "soft_review",
-            "reason":   "Moderate confidence — flagging for optional review",
-            "requires_human": True,
-        }
-
-    @staticmethod
-    def compute_diff(before: dict, after: dict) -> list[dict]:
-        """Field-level diff for the approval UI."""
-        diffs = []
-        all_keys = set(before.keys()) | set(after.keys())
-        for key in all_keys:
-            b, a = before.get(key), after.get(key)
-            if b != a:
-                diffs.append({"field": key, "before": b, "after": a})
-        return diffs
-
-
-# ─────────────────────────────────────────────
-# WHATSAPP INTEGRATION
-# ─────────────────────────────────────────────
-
-class WhatsAppService:
-
-    @staticmethod
-    async def send_text(to: str, body: str) -> dict:
-        provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
-        if provider == "twilio":
-            return await WhatsAppService._send_twilio_text(to, body)
-        return await WhatsAppService._send_meta_text(to, body)
-
-    @staticmethod
-    async def send_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
-        provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
-        if provider == "twilio":
-            return await WhatsAppService._send_twilio_document(to, doc_url, filename, caption)
-        return await WhatsAppService._send_meta_document(to, doc_url, filename, caption)
-
-    @staticmethod
-    async def _send_meta_text(to: str, body: str) -> dict:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{cfg.WHATSAPP_API_URL}/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
-                headers={"Authorization": f"Bearer {os.getenv('WHATSAPP_TOKEN')}"},
-                json={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "text",
-                    "text": {"body": body},
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    @staticmethod
-    async def _send_meta_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{cfg.WHATSAPP_API_URL}/{os.getenv('WHATSAPP_PHONE_ID')}/messages",
-                headers={"Authorization": f"Bearer {os.getenv('WHATSAPP_TOKEN')}"},
-                json={
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "document",
-                    "document": {"link": doc_url, "filename": filename, "caption": caption},
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    @staticmethod
-    async def _send_twilio_text(to: str, body: str) -> dict:
-        account_sid = WhatsAppService._env("TWILIO_ACCOUNT_SID")
-        auth_token = WhatsAppService._env("TWILIO_AUTH_TOKEN")
-        from_number = WhatsAppService._twilio_whatsapp_number(
-            WhatsAppService._env("TWILIO_PHONE_NUMBER")
-        )
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
-                auth=(account_sid, auth_token),
-                data={
-                    "From": from_number,
-                    "To": WhatsAppService._twilio_whatsapp_number(to),
-                    "Body": body,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    @staticmethod
-    async def _send_twilio_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
-        account_sid = WhatsAppService._env("TWILIO_ACCOUNT_SID")
-        auth_token = WhatsAppService._env("TWILIO_AUTH_TOKEN")
-        from_number = WhatsAppService._twilio_whatsapp_number(
-            WhatsAppService._env("TWILIO_PHONE_NUMBER")
-        )
-        body = caption or filename
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
-                auth=(account_sid, auth_token),
-                data={
-                    "From": from_number,
-                    "To": WhatsAppService._twilio_whatsapp_number(to),
-                    "Body": body,
-                    "MediaUrl": doc_url,
-                },
-            )
-            resp.raise_for_status()
-            return resp.json()
-
-    @staticmethod
-    def parse_meta_inbound(payload: dict) -> list[dict]:
-        """Parse Meta WhatsApp webhook → list of message dicts."""
-        messages = []
-        for entry in payload.get("entry", []):
-            for change in entry.get("changes", []):
-                value = change.get("value", {})
-                for msg in value.get("messages", []):
-                    msg_type = msg.get("type")
-                    # Extract document metadata (media_id) when present
-                    doc      = msg.get("document", {})
-                    messages.append({
-                        "from":      msg.get("from"),
-                        "wa_msg_id": msg.get("id"),
-                        "type":      msg_type,
-                        "text":      msg.get("text", {}).get("body", ""),
-                        "timestamp": msg.get("timestamp"),
-                        "contact":   value.get("contacts", [{}])[0],
-                        # document fields — present only for document messages
-                        "media_id":  doc.get("id"),
-                        "mime_type": doc.get("mime_type", "application/pdf"),
-                        "filename":  doc.get("filename"),
-                    })
-        return messages
-
-    @staticmethod
-    def parse_twilio_inbound(form: dict) -> list[dict]:
-        """Parse Twilio WhatsApp webhook form data → list of message dicts."""
-        text = form.get("Body", "")
-        media_urls = [
-            form.get(f"MediaUrl{i}")
-            for i in range(int(form.get("NumMedia", "0") or 0))
-            if form.get(f"MediaUrl{i}")
-        ]
-        return [{
-            "from": WhatsAppService._strip_twilio_whatsapp_prefix(form.get("From", "")),
-            "wa_msg_id": form.get("MessageSid") or form.get("SmsSid"),
-            "type": "document" if media_urls else "text",
-            "text": text,
-            "timestamp": datetime.utcnow().isoformat(),
-            "contact": {
-                "profile": {"name": form.get("ProfileName", "")},
-                "wa_id": WhatsAppService._strip_twilio_whatsapp_prefix(form.get("WaId", "")),
-            },
-            "media_urls": media_urls,
-            "provider": "twilio",
-        }]
-
-    @staticmethod
-    def _twilio_whatsapp_number(number: str) -> str:
-        if number.startswith("whatsapp:"):
-            return number
-        return f"whatsapp:{number}"
-
-    @staticmethod
-    def _strip_twilio_whatsapp_prefix(number: str) -> str:
-        return number.removeprefix("whatsapp:")
-
-    @staticmethod
-    def _env(name: str) -> str:
-        # Backward compatible with the current env typo: TWIlIO_*.
-        legacy_name = name.replace("TWILIO", "TWIlIO")
-        value = os.getenv(name) or os.getenv(legacy_name) or getattr(cfg, name, "")
-        if not value:
-            raise RuntimeError(f"{name} is required for Twilio WhatsApp")
-        return value
-
-    @staticmethod
-    async def download_media(media_id: str) -> bytes:
-        """Download a media file from Meta WhatsApp Cloud API using its media_id."""
-        token = os.getenv("WHATSAPP_TOKEN", cfg.WHATSAPP_TOKEN)
-
-        # Step 1: Resolve the temporary download URL
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{cfg.WHATSAPP_API_URL}/{media_id}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            download_url = resp.json()["url"]
-
-        # Step 2: Fetch the actual binary content
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(
-                download_url,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            resp.raise_for_status()
-            return resp.content
-
-
-# ─────────────────────────────────────────────
-# KILLER DEMO WORKFLOW
-# End-to-end: PO → Invoice → HS Check → HITL → Send
-# ─────────────────────────────────────────────
-
-class KillerDemoWorkflow:
-    """
-    The workflow that closes deals.
-    PO (PDF/WhatsApp) → Extract → Validate HS → Generate Docs
-    → HITL Decision → Approve → Send via WhatsApp/Email → Track
-    """
-
-    def __init__(self, org_id: uuid.UUID, db=None):
-        self.org_id = org_id
-        self.db     = db
-
-    async def execute(
-        self,
-        source: str,
-        raw_text: str | None = None,
-        file_bytes: bytes | None = None,
-        buyer_whatsapp: str | None = None,
-        buyer_email: str | None = None,
-    ) -> dict:
-
-        steps_log = []
-
-        def log(step: str, status: str, data: dict | None = None):
-            entry = {"step": step, "status": status, "ts": datetime.utcnow().isoformat(), "data": data or {}}
-            steps_log.append(entry)
-            return entry
-
-        # ── STEP 1: EXTRACT PO ────────────────────────────
-        log("po_extraction", "running")
-        agent = POExtractionAgent(self.org_id)
-
-        if file_bytes:
-            doc_intel = await DocumentIntelligenceEngine.extract_from_file(
-                file_bytes, "application/pdf"
-            )
-            raw_text = doc_intel["raw_text"]
-
-        extraction = await agent.run({"source": source, "raw_text": raw_text or ""})
-        extracted  = extraction["data"]
-        log("po_extraction", "done", {"confidence": extracted.get("confidence"), "items": len(extracted.get("items", []))})
-
-        # ── STEP 2: HS CODE VALIDATION ────────────────────
-        log("hs_validation", "running")
-        hs_agent  = HSCodeValidationAgent(self.org_id)
-        hs_result = await hs_agent.run({
-            "items": extracted.get("items", []),
-            "from_country": "IN",
-            "to_country":   extracted.get("buyer_country", "AE")[:2].upper() if extracted.get("buyer_country") else "AE",
-        })
-        hs_data = hs_result["data"]
-        risk_flags = [
-            {"message": f, "severity": "high"}
-            for f in hs_data.get("flags", [])
-        ]
-        log("hs_validation", "done", {"clearance": hs_data.get("overall_clearance"), "flags": len(risk_flags)})
-
-        # ── STEP 3: GENERATE DOCUMENTS ────────────────────
-        log("doc_generation", "running")
-        doc_agent = DocumentGenerationAgent(self.org_id)
-        order_data = {
-            "buyer":    extracted.get("buyer_name"),
-            "country":  extracted.get("buyer_country"),
-            "items":    hs_data.get("validations", []),
-            "currency": extracted.get("currency", "USD"),
-            "terms":    extracted.get("payment_terms"),
-            "incoterms": extracted.get("incoterms"),
-            "port":     extracted.get("destination_port"),
-        }
-
-        invoice_result  = await doc_agent.run({"doc_type": "commercial_invoice", "order": order_data})
-        packing_result  = await doc_agent.run({"doc_type": "packing_list",       "order": order_data})
-        invoice_data    = invoice_result["doc_data"]
-        overall_confidence = min(
-            extracted.get("confidence", 80),
-            invoice_result.get("confidence", 80),
-        )
-        log("doc_generation", "done", {"docs": ["commercial_invoice", "packing_list"], "confidence": overall_confidence})
-
-        # ── STEP 4: HITL DECISION ─────────────────────────
-        log("hitl_evaluation", "running")
-        hitl_decision = HITLOrchestrator.evaluate(
-            "doc_generation",
-            overall_confidence,
-            risk_flags,
-        )
-        log("hitl_evaluation", "done", hitl_decision)
-
-        approval_required = hitl_decision["requires_human"]
-        approval_id       = str(uuid.uuid4()) if approval_required else None
-
-        # ── STEP 5: SEND NOTIFICATION ─────────────────────
-        if approval_required:
-            # Pause here — system waits for human action
-            log("awaiting_human", "paused", {
-                "approval_id": approval_id,
-                "decision":    hitl_decision["decision"],
-                "reason":      hitl_decision["reason"],
-                "confidence":  overall_confidence,
-            })
-        else:
-            # Auto-approved — dispatch immediately
-            log("dispatch", "running")
-            if buyer_whatsapp:
-                await WhatsAppService.send_text(
-                    to=buyer_whatsapp,
-                    body=(
-                        f"✅ Your order has been confirmed and documents are ready.\n\n"
-                        f"Order: {invoice_data.get('invoice_number', 'N/A')}\n"
-                        f"Amount: {invoice_data.get('currency')} {invoice_data.get('grand_total')}\n"
-                        f"Terms: {invoice_data.get('payment_terms')}\n"
-                        f"ETA: 3 working days\n\n"
-                        f"Documents will follow shortly. Thank you! 🚢"
-                    )
-                )
-            log("dispatch", "done", {"channel": "whatsapp"})
-
-        return {
-            "workflow_id":       str(uuid.uuid4()),
-            "status":            "awaiting_approval" if approval_required else "completed",
-            "approval_id":       approval_id,
-            "hitl_decision":     hitl_decision,
-            "overall_confidence": overall_confidence,
-            "steps":             steps_log,
-            "extracted_order":   extracted,
-            "hs_validation":     hs_data,
-            "documents": {
-                "commercial_invoice": invoice_data,
-                "packing_list":       packing_result["doc_data"],
-            },
-            "risk_flags": risk_flags,
-        }
-
-
-# ─────────────────────────────────────────────
-# FASTAPI APP
+# FASTAPI LIFECYCLE MANAGEMENT
 # ─────────────────────────────────────────────
 
 @asynccontextmanager
@@ -1277,15 +293,13 @@ async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────
     print("🚀 TradeOS API starting — connecting to DB, Kafka, Temporal…")
 
-    # pypdf check
     try:
-        from pypdf import PdfReader  # noqa: F401
+        from pypdf import PdfReader
         print("✅ pypdf available — text-layer PDF extraction enabled")
     except ImportError:
         print("⚠️  pypdf NOT installed. PDF text extraction will fall back to PaddleOCR.")
         print("   Fix: add 'pypdf' to requirements.txt and rebuild the image.")
 
-    # DB pool
     try:
         from core.db import init_pool, SEED_ORG_ID, get_pool
         await init_pool()
@@ -1343,7 +357,7 @@ async def get_org_context(request: Request) -> OrgContext:
 
 
 # ─────────────────────────────────────────────
-# ROUTES
+# ROUTING HANDLERS
 # ─────────────────────────────────────────────
 
 @app.get("/health")
@@ -1373,9 +387,6 @@ async def run_killer_demo(
     Feed it a PO (text or PDF) and it runs the full pipeline:
     Extract → HS Validate → Generate Invoice + Packing List
     → HITL decision → Send WhatsApp/Email → Return full result.
-
-    Uses the deterministic WorkflowEngine (saga pattern) — LLMs are
-    tools called within steps, not orchestrators.
     """
     from core.workflow_engine import build_po_to_dispatch_workflow
 
@@ -1403,9 +414,8 @@ async def run_killer_demo(
         raw_input=raw_input,
     )
 
-    # Stream step events to WebSocket clients via the audit log
     async def ws_hook(event: dict):
-        pass  # In production: push to Kafka topic for workflow_id
+        pass
 
     engine.on_event(ws_hook)
 
@@ -1419,7 +429,7 @@ async def run_killer_demo(
     return result
 
 
-# ── WHATSAPP ──────────────────────────────────
+# ── WHATSAPP WEBHOOK INTERFACES ───────────────
 
 @app.get("/api/v1/webhooks/whatsapp")
 async def whatsapp_verify(
@@ -1442,11 +452,10 @@ async def whatsapp_inbound(
     """Receive inbound WhatsApp messages → trigger workflow."""
     messages = WhatsAppService.parse_meta_inbound(payload.model_dump())
     for msg in messages:
-        # Async: don't block the webhook response
         background_tasks.add_task(
             _process_inbound_whatsapp,
             msg,
-            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),  # resolve from phone
+            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
         )
     return {"status": "received"}
 
@@ -1463,7 +472,7 @@ async def twilio_whatsapp_inbound(
         background_tasks.add_task(
             _process_inbound_whatsapp,
             msg,
-            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),  # resolve from phone
+            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
         )
     return {"status": "received"}
 
@@ -1485,7 +494,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
     if msg_type == "document":
         media_id = msg.get("media_id")
         if not media_id:
-            # Twilio sends media_urls instead of media_id
             media_urls = msg.get("media_urls", [])
             if media_urls:
                 async with httpx.AsyncClient(timeout=60) as client:
@@ -1493,9 +501,8 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
                     resp.raise_for_status()
                     file_bytes = resp.content
             else:
-                return  # malformed payload — skip
+                return
         else:
-            # Meta: acknowledge receipt immediately so buyer isn't left waiting
             await WhatsAppService.send_text(
                 to=sender,
                 body="📄 PDF received! Processing your purchase order...",
@@ -1505,18 +512,16 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
 
     elif msg_type == "text":
         if not text.strip():
-            return  # empty message — ignore
+            return
 
         # ── Intent gate — classify before touching the workflow ────────
-        # PDFs always go to the workflow; plain text is classified first.
         intent = await LLMRouter.classify_intent(text)
         print(f"[WA intent] intent={intent} from={sender}")
 
         if intent == "ignore":
-            return  # spam/noise — zero further processing
+            return
 
         if intent in ("query", "greeting", "complaint"):
-            # Answer locally via Ollama + RAG knowledge base
             try:
                 from core.db import get_pool
                 from core.knowledge_base import KnowledgeBase
@@ -1529,7 +534,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
                 )
             except Exception as exc:
                 print(f"[WA intent] KnowledgeBase.answer failed: {exc}")
-                # Hardcoded safe fallbacks
                 if intent == "complaint":
                     reply = (
                         "We sincerely apologize for the inconvenience. "
@@ -1547,14 +551,12 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
                     )
             if sender:
                 await WhatsAppService.send_text(to=sender, body=reply)
-            return  # handled locally — workflow not triggered
-
-        # intent == "purchase_order" → fall through to full workflow
+            return
 
     else:
-        return  # audio, image, sticker, etc. — ignore
+        return
 
-    # ── Build and run workflow (WorkflowEngine → KillerDemoWorkflow fallback) ─
+    # ── Build and run workflow ────────
     raw_input = {
         "raw_text":       text,
         "buyer_whatsapp": sender,
@@ -1576,7 +578,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
         )
         result = await engine.run()
 
-        # WorkflowEngine completed but a step failed — log which step and fall through to fallback
         if result.get("status") == "failed":
             step_statuses = result.get("step_statuses", {})
             print(f"[WA workflow] WorkflowEngine step failure: {step_statuses}")
@@ -1587,7 +588,7 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
         print(f"[WA workflow] WorkflowEngine failed — {primary_exc}")
         traceback.print_exc()
 
-        # ── Fallback: KillerDemoWorkflow ──────────────────────────
+        # ── Fallback: Distributed KillerDemoWorkflow Runner ──
         try:
             wf = KillerDemoWorkflow(org_id=org_id)
             result = await wf.execute(
@@ -1615,7 +616,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
                     pass
             return
 
-    # ── Normalise confidence ──────────────────────────────────────
     confidence = float(
         result.get("overall_confidence")
         or result.get("confidence")
@@ -1625,7 +625,6 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
 
     print(f"[WA workflow] status={result.get('status')} confidence={confidence}")
 
-    # ── Notify sender of review status ────────────────────
     if sender and result.get("status") in ("awaiting_human", "awaiting_approval"):
         approval_id = result.get("approval_id", "N/A")
         await WhatsAppService.send_text(
@@ -1639,11 +638,9 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
                 f"Reference ID: `{approval_id}`"
             ),
         )
-    # If status == 'completed', the workflow's send_notifications step
-    # already sent the confirmation message to the buyer.
 
 
-# ── HITL APPROVALS ───────────────────────────
+# ── HUMAN IN THE LOOP (HITL) APPROVALS ────────
 
 @app.get("/api/v1/approvals")
 async def list_approvals(
@@ -1672,7 +669,6 @@ async def list_approvals(
                 status_filter,
             )
             approvals = [dict(r) for r in rows]
-            # Serialise non-JSON-native types
             for a in approvals:
                 for k, v in a.items():
                     if hasattr(v, "isoformat"):
@@ -1681,7 +677,6 @@ async def list_approvals(
                         a[k] = str(v)
         return {"approvals": approvals, "total": len(approvals)}
     except RuntimeError:
-        # Pool not available (DB offline during startup)
         return {"approvals": [], "total": 0, "warning": "DB unavailable"}
 
 
@@ -1693,13 +688,6 @@ async def action_approval(
 ):
     """
     Human approves / rejects / requests changes on a paused workflow.
-
-    Steps:
-      1. Fetch approval_request — 404 if not found or wrong org
-      2. Guard: must be in 'pending' status
-      3. Write audit_log entry
-      4. Update approval_request status + reviewed_by/at/note
-      5. Resume the live WorkflowEngine (or mark cancelled)
     """
     from core.db import get_pool
     from core.workflow_engine import get_engine
@@ -1707,7 +695,6 @@ async def action_approval(
     pool = get_pool()
     async with pool.acquire() as db:
 
-        # 1 — Fetch
         row = await db.fetchrow(
             """
             SELECT id, workflow_id, order_id, status, org_id
@@ -1725,14 +712,12 @@ async def action_approval(
                 detail=f"Approval is already '{row['status']}' — cannot act again",
             )
 
-        # 2 — Map action → DB status
         new_status = {
             "approve":          "approved",
             "reject":           "rejected",
-            "request_changes":  "pending",   # stays pending; new diff_after stored
+            "request_changes":  "pending",
         }[body.action]
 
-        # 3 — Audit log
         audit_id = uuid.uuid4()
         await db.execute(
             """
@@ -1754,7 +739,6 @@ async def action_approval(
             json.dumps({"field_overrides": body.field_overrides}),
         )
 
-        # 4 — Update approval_request
         await db.execute(
             """
             UPDATE approval_requests
@@ -1772,7 +756,6 @@ async def action_approval(
             approval_id,
         )
 
-        # 5 — Resume live engine
         workflow_id = str(row["workflow_id"])
         engine = get_engine(workflow_id)
 
@@ -1786,7 +769,6 @@ async def action_approval(
                 print(f"[Approval] workflow {workflow_id} resumed → {resumed_result.get('status')}")
             except Exception as exc:
                 print(f"[Approval] resume failed for workflow {workflow_id}: {exc}")
-                # Not fatal — approval is persisted; engine may have been recycled
         else:
             print(f"[Approval] no live engine for workflow {workflow_id} — persisted only")
 
@@ -1801,7 +783,7 @@ async def action_approval(
     }
 
 
-# ── DOCUMENTS ─────────────────────────────────
+# ── DOCUMENTS PROCESSING & PRODUCTION ──────────
 
 @app.post("/api/v1/documents/extract")
 async def extract_document(
@@ -1831,7 +813,7 @@ async def generate_document(
     return {"documents": results}
 
 
-# ── HS CODE ───────────────────────────────────
+# ── COMPLIANCE HS CODE EVALUATION ─────────────
 
 @app.post("/api/v1/compliance/hs-validate")
 async def validate_hs(
@@ -1845,7 +827,7 @@ async def validate_hs(
     return result
 
 
-# ── AGENT MEMORY ──────────────────────────────
+# ── AGENT MEMORY ROUTING ──────────────────────
 
 @app.post("/api/v1/memory")
 async def upsert_memory(body: MemoryUpsertRequest, ctx: OrgContext = Depends(get_org_context)):
@@ -1854,18 +836,15 @@ async def upsert_memory(body: MemoryUpsertRequest, ctx: OrgContext = Depends(get
 
 @app.get("/api/v1/memory/search")
 async def search_memory(query: str, top_k: int = 5, ctx: OrgContext = Depends(get_org_context)):
-    # In production: vector similarity search on agent_memory table
     return {"memories": [], "query": query}
 
 
-# ── REAL-TIME: WebSocket for live workflow status ──
+# ── REAL-TIME MONITORING WORKSPACES ───────────
 
 @app.websocket("/ws/workflow/{workflow_id}")
 async def workflow_status_ws(websocket: WebSocket, workflow_id: str):
     await websocket.accept()
     try:
-        # Subscribe to Kafka topic for this workflow_id
-        # Stream step updates in real-time to the frontend
         for i in range(10):
             await asyncio.sleep(1)
             await websocket.send_json({
