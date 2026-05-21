@@ -565,7 +565,12 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 extracted.get("payment_terms"),
                 extracted.get("incoterms"),
                 extracted.get("destination_port"),
-                buyer_country, ctx.source,
+                buyer_country,
+                # Map internal source names to DB constraint values:
+                # 'file' (PDF upload via WA) → 'whatsapp'
+                # anything else unknown      → 'manual'
+                {"file": "whatsapp", "whatsapp": "whatsapp",
+                 "email": "email", "portal": "portal"}.get(ctx.source, "manual"),
                 extracted.get("raw_text") or None,
                 db_workflow_id,
             )
