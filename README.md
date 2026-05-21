@@ -162,6 +162,9 @@ POSTGRES_HOST_PORT=5432 REDIS_HOST_PORT=6379 docker compose up -d postgres redis
 docker compose ps
 ```
 
+### 3.a. Pull Ollama Model If not done already
+`docker exec ollama ollama pull qwen2.5:3b`
+
 ### 4. Run killer demo
 ```bash
 # Text PO

@@ -505,6 +505,51 @@ class LLMRouter:
             return {"text": resp.json()["message"]["content"]}
 
 
+
+    @staticmethod
+    async def classify_intent(text: str) -> str:
+        """
+        Classify a WhatsApp text message using the cloud LLM chain.
+        Returns: "purchase_order" | "query" | "complaint" | "greeting" | "ignore"
+
+        Uses cloud LLM (Groq → Gemini → OpenAI) for accuracy.
+        Only called for msg_type == "text". PDFs skip this and go directly to workflow.
+        Defaults to "purchase_order" on any failure so real orders are never dropped.
+        """
+        system = (
+            "You are a WhatsApp message classifier for an international seafood and "
+            "agricultural export company. Classify the message into exactly one category:\n"
+            "- purchase_order : buyer wants to place or discuss a new order "
+            "(mentions quantities, prices, goods, delivery, payment terms)\n"
+            "- query          : asking about shipment status, documents, pricing, "
+            "products, certifications, lead times, or trade processes\n"
+            "- complaint      : expressing dissatisfaction about quality, delivery, "
+            "service, or a past transaction\n"
+            "- greeting       : hello, good morning, hi, thanks, casual chat with "
+            "no specific trade request\n"
+            "- ignore         : spam, test messages, or completely unrelated content\n"
+            "Reply with ONLY the category word. No explanation. No punctuation."
+        )
+        try:
+            result = await LLMRouter.complete(
+                system_prompt=system,
+                user_prompt=text[:500],
+                max_tokens=8,
+                temperature=0.0,
+            )
+            raw = result.get("text", "").strip().lower().rstrip(".")
+            valid = ("purchase_order", "query", "complaint", "greeting", "ignore")
+            if raw in valid:
+                return raw
+            for v in valid:
+                if v in raw:
+                    return v
+            print(f"[Intent] unexpected response '{raw}' — defaulting to purchase_order")
+            return "purchase_order"
+        except Exception as exc:
+            print(f"[Intent] classification failed ({exc}) — defaulting to purchase_order")
+            return "purchase_order"
+
 # ─────────────────────────────────────────────
 # AGENT BASE
 # ─────────────────────────────────────────────
@@ -1242,11 +1287,21 @@ async def lifespan(app: FastAPI):
 
     # DB pool
     try:
-        from core.db import init_pool
+        from core.db import init_pool, SEED_ORG_ID, get_pool
         await init_pool()
     except Exception as exc:
         print(f"⚠️  DB pool failed to initialise: {exc}")
         print("   Approval/shipment persistence will be unavailable this session.")
+
+    # Knowledge base — seed FAQ into agent_memory (idempotent)
+    try:
+        from core.db import get_pool, SEED_ORG_ID
+        from core.knowledge_base import KnowledgeBase
+        pool = get_pool()
+        await KnowledgeBase.seed(pool, SEED_ORG_ID)
+    except Exception as exc:
+        print(f"⚠️  Knowledge base seed failed: {exc}")
+        print("   FAQ/RAG answers will fall back to hardcoded replies.")
 
     yield
 
@@ -1451,6 +1506,50 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
     elif msg_type == "text":
         if not text.strip():
             return  # empty message — ignore
+
+        # ── Intent gate — classify before touching the workflow ────────
+        # PDFs always go to the workflow; plain text is classified first.
+        intent = await LLMRouter.classify_intent(text)
+        print(f"[WA intent] intent={intent} from={sender}")
+
+        if intent == "ignore":
+            return  # spam/noise — zero further processing
+
+        if intent in ("query", "greeting", "complaint"):
+            # Answer locally via Ollama + RAG knowledge base
+            try:
+                from core.db import get_pool
+                from core.knowledge_base import KnowledgeBase
+                pool  = get_pool()
+                reply = await KnowledgeBase.answer(
+                    pool=pool,
+                    org_id=str(org_id),
+                    question=text,
+                    intent=intent,
+                )
+            except Exception as exc:
+                print(f"[WA intent] KnowledgeBase.answer failed: {exc}")
+                # Hardcoded safe fallbacks
+                if intent == "complaint":
+                    reply = (
+                        "We sincerely apologize for the inconvenience. "
+                        "Our team will contact you within 24 hours. Thank you for your patience."
+                    )
+                elif intent == "greeting":
+                    reply = (
+                        "Hello! 👋 Welcome to Agro Exports India. "
+                        "How can I assist you with your export requirements today?"
+                    )
+                else:
+                    reply = (
+                        "Thank you for your question. "
+                        "Our team will get back to you shortly with the information you need."
+                    )
+            if sender:
+                await WhatsAppService.send_text(to=sender, body=reply)
+            return  # handled locally — workflow not triggered
+
+        # intent == "purchase_order" → fall through to full workflow
 
     else:
         return  # audio, image, sticker, etc. — ignore
