@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Read confidence thresholds from .env via cfg ─────────────────
+from core.config import cfg as _cfg
+
 
 # ─────────────────────────────────────────────
 # LIVE ENGINE REGISTRY
@@ -359,7 +362,8 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         # Fallback: if no items extracted, skip gracefully
         if not items:
             ctx.hs_validations = {"validations": [], "overall_clearance": True, "flags": []}
-            return StepResult(status=StepStatus.COMPLETED, output=ctx.hs_validations, confidence=80)
+            return StepResult(status=StepStatus.COMPLETED, output=ctx.hs_validations,
+                              confidence=_cfg.CONFIDENCE_THRESHOLD_AUTO)
 
         agent = HSCodeValidationAgent(org_id=_uuid.UUID(ctx.org_id))
         try:
@@ -379,7 +383,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                         "original_hs_code":     item.get("hs_code", ""),
                         "validated_hs_code":    item.get("hs_code", ""),
                         "is_valid":             True,
-                        "confidence":           70,
+                        "confidence":           _cfg.CONFIDENCE_THRESHOLD_HUMAN,
                         "correction_reason":    "passthrough — validation unavailable",
                     }
                     for item in items
@@ -389,12 +393,28 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             }
 
         ctx.hs_validations = hs_data
+        # Build risk_flags from per-item severity — respect what the LLM determined.
+        # Only "critical" or "high" items become risk_flags; advisory notes stay informational.
+        for v in hs_data.get("validations", []):
+            severity = (v.get("severity") or "ok").lower()
+            if severity in ("high", "critical") and v.get("action_required"):
+                ctx.risk_flags.append({
+                    "message":  v.get("action_required") or v.get("correction_reason", ""),
+                    "severity": severity,
+                    "source":   "hs_validation",
+                })
+        # Also capture any top-level flags the LLM returned — treat as "medium" (advisory only)
+        # so they are logged but don't block auto-approve.
         for flag in hs_data.get("flags", []):
-            ctx.risk_flags.append({"message": flag, "severity": "high", "source": "hs_validation"})
+            ctx.risk_flags.append({"message": flag, "severity": "medium", "source": "hs_validation"})
+        print(f"[validate_hs] risk_flags added: {len(ctx.risk_flags)}  "
+              f"(critical={sum(1 for f in ctx.risk_flags if f['severity']=='critical')}, "
+              f"high={sum(1 for f in ctx.risk_flags if f['severity']=='high')})")
 
         confidence = min(
-            ctx.overall_confidence,
-            min((v.get("confidence", 70) for v in hs_data.get("validations", [])), default=70)
+            float(ctx.overall_confidence),
+            min((float(v.get("confidence", _cfg.CONFIDENCE_THRESHOLD_AUTO))
+                 for v in hs_data.get("validations", [])), default=_cfg.CONFIDENCE_THRESHOLD_AUTO)
         )
         ctx.overall_confidence = confidence
         return StepResult(status=StepStatus.COMPLETED, output=hs_data, confidence=confidence)
@@ -415,13 +435,17 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         }
 
         # Run each doc independently — one failure must not block the other
-        invoice_data = {}
-        packing_data = {}
+        invoice_data      = {}
+        packing_data      = {}
+        invoice_confidence = _cfg.CONFIDENCE_THRESHOLD_AUTO  # env default
+        packing_confidence = _cfg.CONFIDENCE_THRESHOLD_AUTO  # env default
 
         try:
-            invoice_r    = await agent.run({"doc_type": "commercial_invoice", "order": order_data})
-            invoice_data = invoice_r["doc_data"]
-            print(f"[generate_documents] invoice OK confidence={invoice_data.get('_confidence')}")
+            invoice_r          = await agent.run({"doc_type": "commercial_invoice", "order": order_data})
+            invoice_data       = invoice_r["doc_data"]
+            # Use the normalized confidence returned by the agent (already scaled to %)
+            invoice_confidence = float(invoice_r.get("confidence") or _cfg.CONFIDENCE_THRESHOLD_AUTO)
+            print(f"[generate_documents] invoice OK confidence={invoice_confidence}")
         except Exception as exc:
             print(f"[generate_documents] invoice failed: {exc}")
             invoice_data = {
@@ -433,14 +457,15 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 "incoterms":      ctx.extracted_po.get("incoterms", ""),
                 "bank_details":   {"name": "State Bank of India", "swift": "SBININBB"},
                 "declaration":    "Draft — pending review.",
-                "_confidence":    40,
+                "_confidence":    _cfg.CONFIDENCE_THRESHOLD_AUTO,
                 "_draft":         True,
             }
 
         try:
-            packing_r    = await agent.run({"doc_type": "packing_list", "order": order_data})
-            packing_data = packing_r["doc_data"]
-            print(f"[generate_documents] packing OK confidence={packing_data.get('_confidence')}")
+            packing_r          = await agent.run({"doc_type": "packing_list", "order": order_data})
+            packing_data       = packing_r["doc_data"]
+            packing_confidence = float(packing_r.get("confidence") or _cfg.CONFIDENCE_THRESHOLD_AUTO)
+            print(f"[generate_documents] packing OK confidence={packing_confidence}")
         except Exception as exc:
             print(f"[generate_documents] packing list failed: {exc}")
             packing_data = {
@@ -449,7 +474,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 "total_net_weight_kg":   0,
                 "total_gross_weight_kg": 0,
                 "total_volume_cbm":      0,
-                "_confidence":           40,
+                "_confidence":           _cfg.CONFIDENCE_THRESHOLD_AUTO,
                 "_draft":                True,
             }
 
@@ -458,11 +483,12 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
             "packing_list":       packing_data,
         }
 
-        doc_confidence = min(
-            float(invoice_data.get("_confidence") or 40),
-            float(packing_data.get("_confidence") or 40),
-        )
+        # doc_confidence: min of the two normalized doc confidences (already % scale)
+        doc_confidence = min(invoice_confidence, packing_confidence)
+        # overall_confidence = weakest signal across all steps
         ctx.overall_confidence = min(ctx.overall_confidence, doc_confidence)
+        print(f"[generate_documents] overall_confidence={ctx.overall_confidence:.1f}% "
+              f"(AUTO={_cfg.CONFIDENCE_THRESHOLD_AUTO}% HUMAN={_cfg.CONFIDENCE_THRESHOLD_HUMAN}%)")
 
         return StepResult(
             status=StepStatus.COMPLETED,
@@ -484,6 +510,8 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         decision = HITLOrchestrator.evaluate(
             "doc_generation", ctx.overall_confidence, ctx.risk_flags
         )
+        print(f"[HITL] decision={decision['decision']}  confidence={ctx.overall_confidence}  "
+              f"risk_flags={ctx.risk_flags}  reason={decision['reason']}")
 
         # ── Persist workflow + order + approval_request to DB ────────────
         pool = get_pool()

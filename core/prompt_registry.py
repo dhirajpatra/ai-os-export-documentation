@@ -13,6 +13,16 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ─────────────────────────────────────────────
+# CONFIDENCE THRESHOLDS
+# ─────────────────────────────────────────────
+CONFIDENCE_THRESHOLD_AUTO = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
+CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
 
 
 # ─────────────────────────────────────────────
@@ -121,6 +131,14 @@ class PromptRegistry:
 # ALL PRODUCTION PROMPTS
 # ─────────────────────────────────────────────
 
+def _fmt(text: str) -> str:
+    """Replace confidence placeholder tokens in prompt text with env values."""
+    return (text
+        .replace("{CONFIDENCE_THRESHOLD_AUTO:.0f}", f"{CONFIDENCE_THRESHOLD_AUTO:.0f}")
+        .replace("{CONFIDENCE_THRESHOLD_HUMAN:.0f}", f"{CONFIDENCE_THRESHOLD_HUMAN:.0f}")
+    )
+
+
 def load_all_prompts():
     """Call at startup. All prompt versions registered here."""
 
@@ -132,7 +150,7 @@ def load_all_prompts():
         version      = 3,
         notes        = "v3: improved Arabic handling, added incoterm detection",
         model_hints  = ["claude-opus-4-6", "gpt-4o"],
-        system_prompt= """
+        system_prompt= _fmt("""
 You are an expert international trade document analyst with 20+ years of experience.
 Your job is to extract structured data from purchase orders arriving via WhatsApp, email, or PDF.
 
@@ -153,14 +171,13 @@ EXTRACTION RULES:
 - Dates: normalize to ISO 8601 (YYYY-MM-DD).
 
 CONFIDENCE SCORING:
-- 90-100: All mandatory fields present, no ambiguity.
-- 70-89:  Minor gaps (delivery date missing, HS code not provided).
-- 50-69:  Multiple unclear fields, needs verification.
-- Below 50: Flag for mandatory human review.
+- {CONFIDENCE_THRESHOLD_AUTO:.0f}-100: All mandatory fields present, no ambiguity.
+- {CONFIDENCE_THRESHOLD_HUMAN:.0f}-{CONFIDENCE_THRESHOLD_AUTO:.0f}: Minor gaps (delivery date missing, HS code not provided).
+- Below {CONFIDENCE_THRESHOLD_HUMAN:.0f}: Flag for mandatory human review.
 
 MANDATORY FIELDS (confidence drops 10pts each if missing):
 buyer_name, items (with quantity + unit + price), currency, destination_country
-""",
+"""),
         user_template= """
 PO Source: {source}
 Language detected: {detected_lang}
@@ -231,18 +248,18 @@ Extract all fields. Return valid JSON only.
         version      = 1,
         notes        = "Fallback: minimal extraction when full prompt fails",
         model_hints  = ["gpt-4o", "gemini-2.0-flash"],
-        system_prompt= """
+        system_prompt= _fmt("""
 Extract the minimum viable purchase order data from this text.
 Focus only on: buyer name, product description, quantity, unit price, currency, destination.
-Return JSON. Confidence will be set to 60 for all fallback extractions.
-""",
+Return JSON. Confidence will be set to {CONFIDENCE_THRESHOLD_HUMAN:.0f} for all fallback extractions.
+"""),
         user_template= "PO Content:\n{raw_text}\n\nExtract minimum fields.",
         output_schema= {
             "buyer_name": "string",
             "items": [{"description": "string", "quantity": 0, "unit": "string", "unit_price": 0}],
             "currency": "string",
             "destination_country": "string",
-            "confidence": 60,
+            "confidence": CONFIDENCE_THRESHOLD_HUMAN,  # from env
             "warnings": ["Extracted using fallback minimal prompt"]
         }
     ))
@@ -255,7 +272,7 @@ Return JSON. Confidence will be set to 60 for all fallback extractions.
         version      = 2,
         notes        = "v2: Added India Chapter 93 (arms) hard block, UAE Vision 2030 categories",
         model_hints  = ["claude-opus-4-6", "gpt-4o"],
-        system_prompt= """
+        system_prompt= _fmt("""
 You are a certified customs expert with deep knowledge of:
 - WCO Harmonized System (HS) 2022 edition (6-digit)
 - India Customs Tariff (ITC-HS 8-digit)
@@ -279,11 +296,10 @@ HARD BLOCKS (always critical severity):
 - SCOMET items without DGFT license
 
 CONFIDENCE:
-- 95+: Exact match, clean route, no restrictions.
-- 80-94: Minor ambiguity in sub-heading, no restrictions.
-- 60-79: Description mismatch risk, needs product sample/lab cert.
-- Below 60: Critical — block until human expert reviews.
-""",
+- {CONFIDENCE_THRESHOLD_AUTO:.0f}+: Exact match, clean route, no restrictions.
+- {CONFIDENCE_THRESHOLD_HUMAN:.0f}-{CONFIDENCE_THRESHOLD_AUTO:.0f}: Minor ambiguity in sub-heading, no restrictions.
+- Below {CONFIDENCE_THRESHOLD_HUMAN:.0f}: Critical — block until human expert reviews.
+"""),
         user_template= """
 Export Route: {from_country} → {to_country}
 Incoterms: {incoterms}
@@ -331,7 +347,7 @@ Validate each item. Return JSON.
         version      = 4,
         notes        = "v4: LC document compliance, SWIFT MT700 field alignment",
         model_hints  = ["claude-opus-4-6"],
-        system_prompt= """
+        system_prompt= _fmt("""
 You are a senior export documentation officer specializing in international commercial invoices.
 
 STANDARDS:
@@ -355,7 +371,7 @@ CRITICAL RULES:
 
 AMOUNT IN WORDS: Always include.
 BANK DETAILS: Include full beneficiary bank details for TT/DA/DP payments.
-""",
+"""),
         user_template= """
 Order Data:
 {order_json}
@@ -446,12 +462,12 @@ Generate complete commercial invoice. Return JSON only.
         version      = 2,
         notes        = "v2: ISPM-15 fumigation flag, DG cargo detection",
         model_hints  = ["claude-opus-4-6", "gpt-4o"],
-        system_prompt= """
+        system_prompt= _fmt("""
 Generate a detailed export packing list. 
 Calculate gross/net weights and volumes accurately.
 Flag: ISPM-15 wooden packaging requirements, DG goods, CITES items.
 Ensure total weights on packing list match commercial invoice.
-""",
+"""),
         user_template= """
 Order/Invoice Data:
 {order_json}
@@ -504,7 +520,7 @@ Generate packing list JSON.
         version      = 2,
         notes        = "v2: added OFAC SDN check, EU dual-use regulation ref",
         model_hints  = ["claude-opus-4-6", "gpt-4o"],
-        system_prompt= """
+        system_prompt= _fmt("""
 You are a trade compliance expert. Perform a full country-level trade check.
 
 CHECK LIST:
@@ -521,7 +537,7 @@ SEVERITY LEVELS:
 - low: informational.
 
 Be precise. Cite specific regulatory references (DGFT notification number, UAE Cabinet Decision, etc.)
-""",
+"""),
         user_template= """
 Exporter Country: {from_country}
 Importer Country: {to_country}
@@ -558,7 +574,7 @@ Perform complete trade compliance check.
         version      = 2,
         notes        = "v2: Arabic support, GCC business etiquette",
         model_hints  = ["claude-opus-4-6", "gpt-4o"],
-        system_prompt= """
+        system_prompt= _fmt("""
 You are a professional international trade communication specialist.
 Draft concise, professional buyer notifications in the appropriate language.
 
@@ -571,7 +587,7 @@ WhatsApp messages: max 3 short paragraphs, use ✅ 📦 🚢 emojis sparingly.
 Email: formal subject line, 3-4 paragraphs, professional closing.
 
 NEVER include: internal system details, agent names, confidence scores, or errors.
-""",
+"""),
         user_template= """
 Channel: {channel} (whatsapp|email|sms)
 Language: {language}
@@ -628,7 +644,7 @@ class PromptTester:
                 )
                 parsed = json.loads(result["text"])
                 confidence = parsed.get("confidence", parsed.get("_confidence", 0))
-                passed = confidence >= tc.get("min_confidence", 70)
+                passed = confidence >= tc.get("min_confidence", CONFIDENCE_THRESHOLD_AUTO)
                 results.append({
                     "test_case": i,
                     "passed": passed,

@@ -15,6 +15,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 
 # ─────────────────────────────────────────────
@@ -429,7 +432,7 @@ class MemoryObserver:
                 memory_type = "invoice_style",
                 key         = "human_override_pattern",
                 value       = overrides,
-                confidence  = 95.0,
+                confidence  = os.getenv("CONFIDENCE_THRESHOLD_AUTO",90),
                 source      = "feedback",
             )
 

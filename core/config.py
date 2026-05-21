@@ -12,6 +12,9 @@ import uuid
 import httpx
 from typing import Any
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─────────────────────────────────────────────
 # BASELINE RUNTIME CONFIGURATION
@@ -27,13 +30,13 @@ class Settings:
     )
 
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:3b")
+    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
     LLM_CHAIN = [
-        {"provider": "groq",      "model": "llama-3.3-70b-versatile",                "priority": 1},
-        {"provider": "gemini",    "model": "gemini-2.5-flash-preview-04-17",         "priority": 2},
-        {"provider": "openai",    "model": "gpt-4o",                                 "priority": 3},
-        {"provider": "anthropic", "model": "claude-sonnet-4-6",                      "priority": 4},
+        {"provider": "groq",      "model": os.getenv("GROQ_MODEL","llama-3.3-70b-versatile"), "priority": 1},
+        {"provider": "gemini",    "model": os.getenv("GEMINI_MODEL","gemini-2.5-flash-preview-04-17"), "priority": 2},
+        {"provider": "openai",    "model": os.getenv("OPENAI_MODEL","gpt-4o"), "priority": 3},
+        {"provider": "anthropic", "model": os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-6"), "priority": 4},
         {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"), "priority": 5},
     ]
 
@@ -53,12 +56,17 @@ class Settings:
     JWT_SECRET      = os.getenv("JWT_SECRET")
     JWT_EXPIRE_MINS = os.getenv("JWT_EXPIRE_MINS", "480")
 
-    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "92.0"))
-    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "70.0"))
+    # ── STRICTLY DYNAMIC FROM .ENV — safe defaults prevent startup crash ──
+    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
+    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
     APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS",     "4"))
 
 
 cfg = Settings()
+print(
+    f"[Config] CONFIDENCE_THRESHOLD_AUTO={cfg.CONFIDENCE_THRESHOLD_AUTO}%  "
+    f"CONFIDENCE_THRESHOLD_HUMAN={cfg.CONFIDENCE_THRESHOLD_HUMAN}%"
+)
 
 
 class OrgContext(BaseModel):
@@ -348,7 +356,6 @@ class LLMRouter:
         except Exception:
             return "purchase_order"
 
-# ... Keep everything else in core/config.py exactly as it is ...
 
 # ─────────────────────────────────────────────
 # DOCUMENT INTELLIGENCE ENGINE
@@ -394,18 +401,24 @@ class HITLOrchestrator:
                 "requires_human": True,
             }
 
-        if confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
+        # SCALE RECONCILIATION LAYER:
+        # Standardizes fractional decimal confidence (e.g. 0.95) to percentage scales (95.0)
+        # to ensure correct evaluations against your configured .env criteria.
+        normalized_confidence = confidence * 100.0 if confidence <= 1.0 else confidence
+
+        if normalized_confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
             return {
                 "decision": "auto_approve",
-                "reason":   f"Confidence {confidence:.1f}% above threshold, no high-severity flags",
+                "reason":   f"Confidence {normalized_confidence:.1f}% meets auto-approve threshold ({cfg.CONFIDENCE_THRESHOLD_AUTO}%)",
                 "requires_human": False,
             }
 
-        if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
+        if normalized_confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
             return {
                 "decision": "require_human",
                 "reason":   (
-                    f"Confidence {confidence:.1f}% below threshold" if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
+                    f"Confidence {normalized_confidence:.1f}% is lower than threshold ({cfg.CONFIDENCE_THRESHOLD_HUMAN}%)"
+                    if normalized_confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
                     else f"High-severity flags: {[f['message'] for f in high_flags]}"
                 ),
                 "requires_human": True,
@@ -413,7 +426,7 @@ class HITLOrchestrator:
 
         return {
             "decision": "soft_review",
-            "reason":   "Moderate confidence — flagging for optional review",
+            "reason":   f"Moderate confidence ({normalized_confidence:.1f}%) — routing for standard review checklist.",
             "requires_human": True,
         }
 

@@ -1,6 +1,14 @@
 import json
 from services.agents.base import BaseAgent
 from services.api.main import parse_llm_json
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── Read thresholds from .env (float) ──────────────────────────
+_CONFIDENCE_AUTO  = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
+_CONFIDENCE_HUMAN = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
+
 
 class HSCodeValidationAgent(BaseAgent):
     name = "hs_validation_agent"
@@ -36,7 +44,7 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
                 "original_hs_code":     "string",
                 "validated_hs_code":    "string",
                 "is_valid":             True,
-                "confidence":           90,
+                "confidence":           _CONFIDENCE_AUTO,   # float from .env
                 "correction_reason":    "string",
             }],
             "overall_clearance": True,
@@ -57,7 +65,7 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
         data = parse_llm_json(result["text"], "HS code validation")
 
         for v in data.get("validations", []):
-            if v.get("is_valid") and v.get("confidence", 0) > 85:
+            if v.get("is_valid") and float(v.get("confidence", 0)) > _CONFIDENCE_AUTO:
                 await self._remember(
                     key=v["validated_hs_code"],
                     value={"description": v["original_description"], "route": f"{from_country}-{to_country}"},

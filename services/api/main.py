@@ -93,18 +93,23 @@ class HITLOrchestrator:
                 "requires_human": True,
             }
 
-        if confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
+        # SCALE RECONCILIATION: normalise fractional decimal (0.95) → percentage (95.0)
+        # so comparisons against .env thresholds (e.g. 30.0) are correct.
+        normalized_confidence = confidence * 100.0 if confidence <= 1.0 else confidence
+
+        if normalized_confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
             return {
                 "decision": "auto_approve",
-                "reason":   f"Confidence {confidence:.1f}% above threshold, no high-severity flags",
+                "reason":   f"Confidence {normalized_confidence:.1f}% above threshold ({cfg.CONFIDENCE_THRESHOLD_AUTO}%), no high-severity flags",
                 "requires_human": False,
             }
 
-        if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
+        if normalized_confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN or high_flags:
             return {
                 "decision": "require_human",
                 "reason":   (
-                    f"Confidence {confidence:.1f}% below threshold" if confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
+                    f"Confidence {normalized_confidence:.1f}% below threshold ({cfg.CONFIDENCE_THRESHOLD_HUMAN}%)"
+                    if normalized_confidence < cfg.CONFIDENCE_THRESHOLD_HUMAN
                     else f"High-severity flags: {[f['message'] for f in high_flags]}"
                 ),
                 "requires_human": True,
@@ -112,7 +117,7 @@ class HITLOrchestrator:
 
         return {
             "decision": "soft_review",
-            "reason":   "Moderate confidence — flagging for optional review",
+            "reason":   f"Moderate confidence ({normalized_confidence:.1f}%) — flagging for optional review",
             "requires_human": True,
         }
 

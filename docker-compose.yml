@@ -5,6 +5,24 @@
 
 services:
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    networks:
+      - tradeos
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
+
   # ── FastAPI Backend ───────────────────────────────────────
   api:
     build:
@@ -23,10 +41,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_started
+      # redis:
+      #   condition: service_healthy
+      # kafka:
+      #   condition: service_started
       ollama:
         condition: service_started
     restart: unless-stopped
