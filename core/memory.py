@@ -1,7 +1,6 @@
 """
 TradeOS — Agent Memory Layer
 ==============================
-This is your MOAT.
 Agents learn: customer preferences, shipment patterns, HS codes,
 vendor behavior, invoice styles, country rules.
 Backed by PostgreSQL + pgvector for semantic recall.

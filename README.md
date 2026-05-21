@@ -185,6 +185,13 @@ docker compose --profile dev up ngrok
 # ngrok http 8000 --url=preindulgent-madonna-reliably.ngrok-free.dev
 ```
 
+### To Monitor Kafka Streams
+```bash
+docker exec -it api kafka-console-consumer \
+  --bootstrap-server kafka:9092 \
+  --topic workflow_events \
+  --from-beginning
+```
 ---
 
 ## Key API Endpoints

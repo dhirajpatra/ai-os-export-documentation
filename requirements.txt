@@ -74,3 +74,5 @@ pytest-asyncio==0.23.*
 httpx==0.27.*                    # test client
 factory-boy==3.3.*
 Faker==25.2.*
+langgraph==0.0.65
+langchain-core==0.2.10
