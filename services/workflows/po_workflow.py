@@ -9,6 +9,7 @@ from services.agents.hs_validation import HSCodeValidationAgent
 from services.agents.doc_generation import DocumentGenerationAgent
 from services.integrations.whatsapp import WhatsAppService
 from services.api.main import DocumentIntelligenceEngine, HITLOrchestrator
+from core.config import cfg
 
 class WorkflowState(TypedDict):
     org_id: uuid.UUID
@@ -101,7 +102,7 @@ class KillerDemoWorkflow:
         
         return {
             "extracted": extracted,
-            "overall_confidence": extracted.get("confidence", 80),
+            "overall_confidence": extracted.get("confidence", cfg.CONFIDENCE_DEFAULT_FALLBACK),
             "steps_log": log_entries
         }
 
@@ -149,7 +150,7 @@ class KillerDemoWorkflow:
         packing_result = await agent.run({"doc_type": "packing_list",       "order": order_data})
         invoice_data = invoice_result["doc_data"]
         
-        new_confidence = min(state["overall_confidence"], invoice_result.get("confidence", 80))
+        new_confidence = min(state["overall_confidence"], invoice_result.get("confidence", cfg.CONFIDENCE_DEFAULT_FALLBACK))
         
         log_entries.extend(await self._emit_log(state, "doc_generation", "done", {
             "docs": ["commercial_invoice", "packing_list"],

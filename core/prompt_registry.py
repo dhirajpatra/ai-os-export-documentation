@@ -23,6 +23,9 @@ load_dotenv()
 # ─────────────────────────────────────────────
 CONFIDENCE_THRESHOLD_AUTO = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
 CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
+CONFIDENCE_PENALTY_MISSING_FIELD = int(os.getenv("CONFIDENCE_PENALTY_MISSING_FIELD", "10"))
+PROMPT_TEST_PASS_RATE_THRESHOLD = float(os.getenv("PROMPT_TEST_PASS_RATE_THRESHOLD", "0.9"))
+
 
 
 # ─────────────────────────────────────────────
@@ -136,6 +139,7 @@ def _fmt(text: str) -> str:
     return (text
         .replace("{CONFIDENCE_THRESHOLD_AUTO:.0f}", f"{CONFIDENCE_THRESHOLD_AUTO:.0f}")
         .replace("{CONFIDENCE_THRESHOLD_HUMAN:.0f}", f"{CONFIDENCE_THRESHOLD_HUMAN:.0f}")
+        .replace("{CONFIDENCE_PENALTY_MISSING_FIELD}", f"{CONFIDENCE_PENALTY_MISSING_FIELD}")
     )
 
 
@@ -175,7 +179,7 @@ CONFIDENCE SCORING:
 - {CONFIDENCE_THRESHOLD_HUMAN:.0f}-{CONFIDENCE_THRESHOLD_AUTO:.0f}: Minor gaps (delivery date missing, HS code not provided).
 - Below {CONFIDENCE_THRESHOLD_HUMAN:.0f}: Flag for mandatory human review.
 
-MANDATORY FIELDS (confidence drops 10pts each if missing):
+MANDATORY FIELDS (confidence drops {CONFIDENCE_PENALTY_MISSING_FIELD}pts each if missing):
 buyer_name, items (with quantity + unit + price), currency, destination_country
 """),
         user_template= """
@@ -665,7 +669,7 @@ class PromptTester:
             "failed":     total - passed,
             "pass_rate":  round(passed / total * 100, 1) if total else 0,
             "results":    results,
-            "deploy_ok":  passed / total >= 0.9 if total else False,
+            "deploy_ok":  passed / total >= PROMPT_TEST_PASS_RATE_THRESHOLD if total else False,
         }
 
 
