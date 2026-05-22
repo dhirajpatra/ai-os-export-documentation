@@ -21,12 +21,12 @@ services:
     volumes:
       - ./tradeos:/app
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      kafka:
-        condition: service_started
+      # postgres:
+      #   condition: service_healthy
+      # redis:
+      #   condition: service_healthy
+      # kafka:
+      #   condition: service_started
       ollama:
         condition: service_started
     restart: unless-stopped
