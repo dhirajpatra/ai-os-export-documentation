@@ -1,62 +1,56 @@
+"""
+TradeOS — HS Code Validation Agent (services/agents/hs_validation.py)
+======================================================================
+All thresholds from cfg (.env). Uses prompt registry v3 schema.
+Returns requires_clarification for unknown/missing HS codes.
+"""
+
 import json
 from services.agents.base import BaseAgent
 from services.api.main import parse_llm_json
-import os
-from dotenv import load_dotenv
-load_dotenv()
-
-# ── Read thresholds from .env (float) ──────────────────────────
-_CONFIDENCE_AUTO  = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
-_CONFIDENCE_HUMAN = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
+from core.config import cfg
 
 
 class HSCodeValidationAgent(BaseAgent):
     name = "hs_validation_agent"
 
     SYSTEM_PROMPT = """
-You are an international trade compliance expert specializing in HS (Harmonized System) codes.
-Validate HS codes against the official WCO schedule.
-For each code: verify description match, check for country-specific restrictions,
-flag prohibited/restricted categories, suggest corrections if wrong.
-Consider both the 6-digit WCO code and country-specific extensions (8-digit for India, UAE).
+You are an international trade compliance expert specializing in HS codes.
+Validate HS codes against WCO schedule, India ITC-HS, and UAE GCC tariff.
+For each item: verify description match, check export policy, suggest corrections.
+If HS code is missing or uncertain, add a clarification question to requires_clarification.
+Score confidence based on match quality and route cleanliness.
 """
 
     async def run(self, input_data: dict) -> dict:
-        items = input_data["items"]
+        items        = input_data["items"]
         from_country = input_data.get("from_country", "IN")
-        to_country = input_data.get("to_country", "AE")
+        to_country   = input_data.get("to_country",   "AE")
 
+        # Load from prompt registry
+        system_prompt = self.SYSTEM_PROMPT
+        output_schema = self._default_schema()
         try:
             from core.prompt_registry import PromptRegistry
-            prompt_rec = PromptRegistry.get("hs_validation_agent", "validate_hs_codes")
+            prompt_rec    = PromptRegistry.get("hs_validation_agent", "validate_hs_codes")
             system_prompt = prompt_rec.system_prompt
-        except Exception:
-            system_prompt = self.SYSTEM_PROMPT
+            output_schema = prompt_rec.output_schema
+        except Exception as exc:
+            print(f"[HSCodeValidationAgent] Registry fallback: {exc}")
 
         cached_codes = await self._recall(
             query=" ".join(i.get("description", "") for i in items),
             memory_type="hs_code_learned",
         )
 
-        output_schema = {
-            "validations": [{
-                "original_description": "string",
-                "original_hs_code":     "string",
-                "validated_hs_code":    "string",
-                "is_valid":             True,
-                "confidence":           _CONFIDENCE_AUTO,   # float from .env
-                "correction_reason":    "string",
-            }],
-            "overall_clearance": True,
-            "flags": [],
-        }
-
         result = await self.llm.complete(
             system_prompt=system_prompt,
             user_prompt=(
-                f"Validate these items for export from {from_country} to {to_country}:\n"
-                f"{json.dumps(items, indent=2)}\n"
-                f"Previously validated codes for this org: {json.dumps(cached_codes)}"
+                f"Export Route: {from_country} → {to_country}\n"
+                f"Incoterms: CIF\n\n"
+                f"Items to validate:\n{json.dumps(items, indent=2)}\n\n"
+                f"Previously validated codes for this exporter:\n{json.dumps(cached_codes)}\n\n"
+                f"Validate each item. Flag missing info as clarification questions. Return JSON."
             ),
             output_schema=output_schema,
             temperature=0.0,
@@ -64,13 +58,45 @@ Consider both the 6-digit WCO code and country-specific extensions (8-digit for 
 
         data = parse_llm_json(result["text"], "HS code validation")
 
+        # Ensure all confidence values are float
         for v in data.get("validations", []):
-            if v.get("is_valid") and float(v.get("confidence", 0)) > _CONFIDENCE_AUTO:
+            raw = v.get("confidence", cfg.CONFIDENCE_HS_CLOSE)
+            v["confidence"] = float(raw * 100 if float(raw) <= 1.0 else raw)
+
+            # Cache well-validated codes
+            if v.get("is_valid") and v["confidence"] >= cfg.CONFIDENCE_HS_CLOSE:
                 await self._remember(
-                    key=v["validated_hs_code"],
-                    value={"description": v["original_description"], "route": f"{from_country}-{to_country}"},
+                    key=v.get("validated_hs_code", ""),
+                    value={
+                        "description": v.get("original_description", ""),
+                        "route":       f"{from_country}-{to_country}",
+                    },
                     memory_type="hs_code_learned",
                     confidence=v["confidence"],
                 )
 
         return {"status": "ok", "data": data}
+
+    @staticmethod
+    def _default_schema() -> dict:
+        return {
+            "validations": [{
+                "original_description":   "string",
+                "original_hs_code":       "string|null",
+                "validated_hs_code":      "string",
+                "is_valid":               True,
+                "confidence":             0,
+                "india_export_policy":    "Free|Restricted|Prohibited|Canalized|STE",
+                "restrictions":           ["string"],
+                "permits_required":       ["string"],
+                "import_duty_pct":        0,
+                "correction_reason":      "string",
+                "severity":               "ok|warning|high|critical",
+                "requires_clarification": [
+                    {"field": "string", "question": "string", "blocking": False}
+                ],
+            }],
+            "overall_clearance": True,
+            "flags":             ["string"],
+            "notes":             "string",
+        }

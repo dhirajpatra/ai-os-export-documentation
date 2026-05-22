@@ -21,9 +21,9 @@ load_dotenv()
 # ─────────────────────────────────────────────
 # ALL THRESHOLDS FROM .env — NO HARDCODED VALUES
 # ─────────────────────────────────────────────
-CONFIDENCE_THRESHOLD_AUTO           = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",           "85.0"))
-CONFIDENCE_THRESHOLD_HUMAN          = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN",           "70.0"))
-CONFIDENCE_THRESHOLD_FALLBACK       = float(os.getenv("CONFIDENCE_THRESHOLD_FALLBACK",        "75.0"))
+CONFIDENCE_THRESHOLD_AUTO           = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",           "70.0"))
+CONFIDENCE_THRESHOLD_HUMAN          = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN",           "55.0"))
+CONFIDENCE_THRESHOLD_FALLBACK       = float(os.getenv("CONFIDENCE_THRESHOLD_FALLBACK",        "60.0"))
 CONFIDENCE_THRESHOLD_BLOCK          = float(os.getenv("CONFIDENCE_THRESHOLD_BLOCK",           "50.0"))
 CONFIDENCE_PENALTY_MISSING_FIELD    = float(os.getenv("CONFIDENCE_PENALTY_MISSING_FIELD",     "5.0"))
 CONFIDENCE_PENALTY_MISSING_CRITICAL = float(os.getenv("CONFIDENCE_PENALTY_MISSING_CRITICAL",  "15.0"))

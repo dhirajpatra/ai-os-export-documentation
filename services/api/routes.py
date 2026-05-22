@@ -585,12 +585,14 @@ async def workflow_status_ws(websocket: WebSocket, workflow_id: str):
 async def stream_kafka_events():
     """SSE endpoint to stream Kafka messages to the browser for debugging."""
     from aiokafka import AIOKafkaConsumer
+    from core.kafka_producer import get_kafka_bootstrap
     import os
 
     async def event_generator():
+        bootstrap_servers = get_kafka_bootstrap()
         consumer = AIOKafkaConsumer(
             "workflow_events",
-            bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
+            bootstrap_servers=bootstrap_servers,
             auto_offset_reset="latest",
             value_deserializer=lambda v: json.loads(v.decode('utf-8'))
         )

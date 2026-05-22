@@ -272,6 +272,13 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Knowledge base seed failed: {exc}")
         print("   FAQ/RAG answers will fall back to hardcoded replies.")
 
+    # Kafka topics — pre-create workflow_events to prevent auto-create warnings
+    try:
+        from core.kafka_producer import ensure_kafka_topics
+        await ensure_kafka_topics(["workflow_events"])
+    except Exception as exc:
+        print(f"⚠️  Kafka topic pre-creation failed: {exc}")
+
     yield
 
     # ── Shutdown ───────────────────────────────────────────

@@ -57,12 +57,21 @@ class Settings:
     JWT_EXPIRE_MINS = os.getenv("JWT_EXPIRE_MINS", "480")
 
     # ── STRICTLY DYNAMIC FROM .ENV — safe defaults prevent startup crash ──
-    CONFIDENCE_THRESHOLD_AUTO   = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",  "30.0"))
-    CONFIDENCE_THRESHOLD_HUMAN  = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN", "20.0"))
-    CONFIDENCE_PENALTY_MISSING_FIELD = int(os.getenv("CONFIDENCE_PENALTY_MISSING_FIELD", "10"))
-    CONFIDENCE_DEFAULT_FALLBACK = float(os.getenv("CONFIDENCE_DEFAULT_FALLBACK", "80.0"))
-    PROMPT_TEST_PASS_RATE_THRESHOLD = float(os.getenv("PROMPT_TEST_PASS_RATE_THRESHOLD", "0.9"))
-    APPROVAL_TIMEOUT_HOURS      = float(os.getenv("APPROVAL_TIMEOUT_HOURS",     "4"))
+    CONFIDENCE_THRESHOLD_AUTO           = float(os.getenv("CONFIDENCE_THRESHOLD_AUTO",           "70.0"))
+    CONFIDENCE_THRESHOLD_HUMAN          = float(os.getenv("CONFIDENCE_THRESHOLD_HUMAN",           "55.0"))
+    CONFIDENCE_THRESHOLD_FALLBACK       = float(os.getenv("CONFIDENCE_THRESHOLD_FALLBACK",        "60.0"))
+    CONFIDENCE_THRESHOLD_BLOCK          = float(os.getenv("CONFIDENCE_THRESHOLD_BLOCK",           "50.0"))
+    CONFIDENCE_PENALTY_MISSING_FIELD    = float(os.getenv("CONFIDENCE_PENALTY_MISSING_FIELD",     "5.0"))
+    CONFIDENCE_PENALTY_MISSING_CRITICAL = float(os.getenv("CONFIDENCE_PENALTY_MISSING_CRITICAL",  "15.0"))
+    CONFIDENCE_FLOOR_WHATSAPP           = float(os.getenv("CONFIDENCE_FLOOR_WHATSAPP",            "80.0"))
+    CONFIDENCE_FLOOR_PARTIAL            = float(os.getenv("CONFIDENCE_FLOOR_PARTIAL",             "70.0"))
+    CONFIDENCE_FLOOR_MINIMAL            = float(os.getenv("CONFIDENCE_FLOOR_MINIMAL",             "60.0"))
+    CONFIDENCE_HS_EXACT                 = float(os.getenv("CONFIDENCE_HS_EXACT",                  "90.0"))
+    CONFIDENCE_HS_CLOSE                 = float(os.getenv("CONFIDENCE_HS_CLOSE",                  "75.0"))
+    CONFIDENCE_HS_BLOCK                 = float(os.getenv("CONFIDENCE_HS_BLOCK",                  "50.0"))
+    CONFIDENCE_DEFAULT_FALLBACK         = float(os.getenv("CONFIDENCE_DEFAULT_FALLBACK",         "80.0"))
+    PROMPT_TEST_PASS_RATE_THRESHOLD     = float(os.getenv("PROMPT_TEST_PASS_RATE_THRESHOLD",      "0.9"))
+    APPROVAL_TIMEOUT_HOURS              = float(os.getenv("APPROVAL_TIMEOUT_HOURS",              "4"))
 
 
 cfg = Settings()
