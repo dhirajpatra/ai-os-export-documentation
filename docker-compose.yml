@@ -94,6 +94,21 @@ services:
     networks:
       - tradeos
 
+  # ── Kafka UI (visualize messages in browser) ──────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: tradeos-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    depends_on:
+      - kafka
+    networks:
+      - tradeos
+
   # ── Temporal (durable workflow execution) ─────────────────
   temporal:
     image: temporalio/auto-setup:1.22

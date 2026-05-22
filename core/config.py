@@ -72,6 +72,7 @@ class Settings:
     CONFIDENCE_DEFAULT_FALLBACK         = float(os.getenv("CONFIDENCE_DEFAULT_FALLBACK",         "80.0"))
     PROMPT_TEST_PASS_RATE_THRESHOLD     = float(os.getenv("PROMPT_TEST_PASS_RATE_THRESHOLD",      "0.9"))
     APPROVAL_TIMEOUT_HOURS              = float(os.getenv("APPROVAL_TIMEOUT_HOURS",              "4"))
+    SHOW_REVIEW_REASONS                 = os.getenv("SHOW_REVIEW_REASONS", "yes").lower().strip() == "yes"
 
 
 cfg = Settings()
