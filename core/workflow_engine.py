@@ -344,6 +344,14 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         confidence = float(extracted.get("confidence") or 0)
         ctx.overall_confidence = confidence
 
+        for warn in extracted.get("warnings", []):
+            if warn and warn not in [f.get("message") for f in ctx.risk_flags]:
+                ctx.risk_flags.append({
+                    "message": warn,
+                    "severity": "medium",
+                    "source": "po_extraction",
+                })
+
         return StepResult(
             status=StepStatus.COMPLETED,
             output=extracted,
@@ -376,6 +384,11 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         except Exception as exc:
             # HS validation failure is non-critical — use passthrough
             print(f"[validate_hs] fallback due to: {exc}")
+            ctx.risk_flags.append({
+                "message": "Automated compliance checks failed/timed out. Manual verification of HS codes and regulations required.",
+                "severity": "high",
+                "source": "hs_validation",
+            })
             hs_data = {
                 "validations": [
                     {
@@ -506,6 +519,15 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         import uuid as _uuid
         import json as _json
         from datetime import timezone, timedelta
+
+        if ctx.overall_confidence < _cfg.CONFIDENCE_THRESHOLD_AUTO:
+            reason_exists = any("Confidence score" in f.get("message", "") for f in ctx.risk_flags)
+            if not reason_exists:
+                ctx.risk_flags.append({
+                    "message": f"Confidence score ({ctx.overall_confidence:.0f}%) is below the auto-approval threshold ({_cfg.CONFIDENCE_THRESHOLD_AUTO:.0f}%)",
+                    "severity": "medium",
+                    "source": "hitl_decision"
+                })
 
         decision = HITLOrchestrator.evaluate(
             "doc_generation", ctx.overall_confidence, ctx.risk_flags
