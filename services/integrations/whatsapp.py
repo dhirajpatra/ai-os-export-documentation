@@ -9,15 +9,25 @@ class WhatsAppService:
     async def send_text(to: str, body: str) -> dict:
         provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
         if provider == "twilio":
-            return await WhatsAppService._send_twilio_text(to, body)
-        return await WhatsAppService._send_meta_text(to, body)
+            result = await WhatsAppService._send_twilio_text(to, body)
+        else:
+            result = await WhatsAppService._send_meta_text(to, body)
+            
+        from core.kafka_producer import send_event
+        await send_event("workflow_events", "whatsapp.sent", {"to": to, "type": "text", "body": body})
+        return result
 
     @staticmethod
     async def send_document(to: str, doc_url: str, filename: str, caption: str = "") -> dict:
         provider = os.getenv("WHATSAPP_PROVIDER", cfg.WHATSAPP_PROVIDER).lower()
         if provider == "twilio":
-            return await WhatsAppService._send_twilio_document(to, doc_url, filename, caption)
-        return await WhatsAppService._send_meta_document(to, doc_url, filename, caption)
+            result = await WhatsAppService._send_twilio_document(to, doc_url, filename, caption)
+        else:
+            result = await WhatsAppService._send_meta_document(to, doc_url, filename, caption)
+            
+        from core.kafka_producer import send_event
+        await send_event("workflow_events", "whatsapp.sent", {"to": to, "type": "document", "filename": filename})
+        return result
 
     @staticmethod
     async def _send_meta_text(to: str, body: str) -> dict:

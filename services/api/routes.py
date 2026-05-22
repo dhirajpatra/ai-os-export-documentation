@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.config import cfg, LLMRouter, OrgContext
@@ -579,3 +579,26 @@ async def workflow_status_ws(websocket: WebSocket, workflow_id: str):
             })
     except WebSocketDisconnect:
         pass
+
+
+@router.get("/api/v1/stream/kafka")
+async def stream_kafka_events():
+    """SSE endpoint to stream Kafka messages to the browser for debugging."""
+    from aiokafka import AIOKafkaConsumer
+    import os
+
+    async def event_generator():
+        consumer = AIOKafkaConsumer(
+            "workflow_events",
+            bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),
+            auto_offset_reset="latest",
+            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+        )
+        await consumer.start()
+        try:
+            async for msg in consumer:
+                yield f"data: {json.dumps(msg.value)}\n\n"
+        finally:
+            await consumer.stop()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
