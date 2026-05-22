@@ -462,7 +462,8 @@ $$;
 DO $$ DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['organizations','users','contacts','products',
-                            'orders','documents','agent_memory','shipments'] LOOP
+                            'orders','documents','agent_memory','shipments',
+                            'logistics_vendors','logistics_rate_cards'] LOOP
     IF NOT EXISTS (
       SELECT 1 FROM pg_trigger tr
       JOIN pg_class cl ON cl.oid = tr.tgrelid
@@ -475,3 +476,34 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+-- ─── 14. FREIGHT INTELLIGENCE ─────────────────────────────
+
+CREATE TABLE IF NOT EXISTS logistics_vendors (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    country         CHAR(2),
+    supported_ports TEXT[],
+    contact_info    JSONB,
+    services        TEXT[],
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS logistics_rate_cards (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    vendor_id       UUID NOT NULL REFERENCES logistics_vendors(id) ON DELETE CASCADE,
+    charge_type     TEXT NOT NULL,
+    unit_type       TEXT NOT NULL,
+    rate            NUMERIC(14,2) NOT NULL,
+    minimum_charge  NUMERIC(14,2),
+    hazardous_rules JSONB,
+    gst_applicable  BOOLEAN NOT NULL DEFAULT FALSE,
+    effective_date  DATE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_logistics_vendors_org ON logistics_vendors(org_id);
+CREATE INDEX IF NOT EXISTS idx_logistics_rate_cards_vendor ON logistics_rate_cards(vendor_id);
