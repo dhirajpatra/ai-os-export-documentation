@@ -8,24 +8,24 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        libffi-dev \
-        libglib2.0-0 \
-        libgl1 \
-        libgomp1 \
-        libjpeg62-turbo \
-        libpango-1.0-0 \
-        libpangocairo-1.0-0 \
-        libpq-dev \
-        shared-mime-info \
+    build-essential \
+    curl \
+    libffi-dev \
+    libglib2.0-0 \
+    libgl1 \
+    libgomp1 \
+    libjpeg62-turbo \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libpq-dev \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
-COPY .env .env
+# COPY .env .env
 COPY . .
 
 # /app is the project root; all packages (core/, services/) resolve from here
