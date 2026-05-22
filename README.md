@@ -80,6 +80,7 @@ If possible, I’d love to show you a quick demo and understand:
 • where communication bottlenecks happen
 • and how AI can realistically assist your operations.
 
+One documentation executive in a export or freight forwarding company using TradeOS can process 3–5x more shipments.
 ---
 
 ## Architecture Principles
