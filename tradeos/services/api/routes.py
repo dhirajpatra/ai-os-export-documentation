@@ -888,6 +888,101 @@ async def get_workflow_status(
         )
 
 
+# ── SHIPMENTS ─────────────────────────────────────────────────
+
+@router.get("/api/v1/shipments")
+async def list_shipments(
+    status_filter: str | None = Query("active", description="Filter shipments by status (use 'active' for all non-delivered)"),
+    order_id: uuid.UUID | None = Query(None, description="Filter shipments by order ID"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """
+    Fetch details of shipments for the organization.
+    Defaults to returning 'active' shipments (status != 'delivered').
+    """
+    try:
+        from core.db import get_pool
+        pool = get_pool()
+        
+        query = """
+            SELECT 
+                s.id, s.order_id, s.carrier, s.service_type, s.tracking_number, 
+                s.bl_number, s.awb_number, s.container_number, s.vessel_name, 
+                s.voyage_number, s.port_of_loading, s.port_of_discharge, 
+                s.etd, s.eta, s.actual_departure, s.actual_arrival, s.status, 
+                s.last_event, s.last_event_at, s.created_at, s.updated_at,
+                o.order_number
+            FROM shipments s
+            LEFT JOIN orders o ON s.order_id = o.id
+            WHERE s.org_id = $1
+        """
+        
+        args = [ctx.org_id]
+        arg_idx = 2
+        
+        if status_filter:
+            if status_filter.lower() == 'active':
+                query += f" AND s.status != 'delivered'"
+            else:
+                query += f" AND s.status = ${arg_idx}"
+                args.append(status_filter)
+                arg_idx += 1
+                
+        if order_id:
+            query += f" AND s.order_id = ${arg_idx}"
+            args.append(order_id)
+            arg_idx += 1
+            
+        query += f" ORDER BY s.created_at DESC LIMIT ${arg_idx} OFFSET ${arg_idx+1}"
+        args.extend([limit, offset])
+        
+        async with pool.acquire() as db:
+            rows = await db.fetch(query, *args)
+            
+            shipments = []
+            for r in rows:
+                ship_dict = dict(r)
+                for k, v in ship_dict.items():
+                    if hasattr(v, "isoformat"):
+                        ship_dict[k] = v.isoformat()
+                    elif isinstance(v, uuid.UUID):
+                        ship_dict[k] = str(v)
+                    elif hasattr(v, "__str__") and not isinstance(v, (str, int, float, bool, type(None))):
+                        ship_dict[k] = str(v)
+                shipments.append(ship_dict)
+                
+            # Count total
+            count_query = "SELECT COUNT(*) FROM shipments WHERE org_id = $1"
+            count_args = [ctx.org_id]
+            if status_filter:
+                if status_filter.lower() == 'active':
+                    count_query += " AND status != 'delivered'"
+                else:
+                    count_query += " AND status = $2"
+                    count_args.append(status_filter)
+            if order_id:
+                count_query += f" AND order_id = ${len(count_args)+1}"
+                count_args.append(order_id)
+            
+            total_count = await db.fetchval(count_query, *count_args)
+                
+            return {
+                "shipments": shipments, 
+                "total": total_count,
+                "limit": limit,
+                "offset": offset
+            }
+
+    except Exception as exc:
+        print(f"[GET /api/v1/shipments] Error: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to query shipments."
+        )
+
+
 @router.get("/api/v1/stream/kafka")
 async def stream_kafka_events():
     """SSE endpoint to stream Kafka messages to the browser for debugging."""
