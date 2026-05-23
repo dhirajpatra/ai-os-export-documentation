@@ -777,6 +777,63 @@ async def workflow_status_ws(websocket: WebSocket, workflow_id: str):
         pass
 
 
+@router.get("/api/v1/workflows")
+async def list_workflows(
+    status_filter: str | None = Query(None, description="Filter workflows by status"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """List all workflows for the organization."""
+    try:
+        from core.db import get_pool
+        pool = get_pool()
+        query = """
+            SELECT 
+                w.id, w.order_id, w.name, w.status, w.current_step, 
+                w.started_at, w.completed_at,
+                o.order_number
+            FROM workflows w
+            LEFT JOIN orders o ON w.order_id = o.id
+            WHERE w.org_id = $1
+        """
+        args = [ctx.org_id]
+        if status_filter:
+            query += " AND w.status = $2"
+            args.append(status_filter)
+            query += f" ORDER BY w.created_at DESC LIMIT $3 OFFSET $4"
+            args.extend([limit, offset])
+        else:
+            query += f" ORDER BY w.created_at DESC LIMIT $2 OFFSET $3"
+            args.extend([limit, offset])
+
+        async with pool.acquire() as db:
+            rows = await db.fetch(query, *args)
+            workflows = []
+            for r in rows:
+                w_dict = dict(r)
+                for k, v in w_dict.items():
+                    if hasattr(v, "isoformat"):
+                        w_dict[k] = v.isoformat()
+                    elif isinstance(v, uuid.UUID):
+                        w_dict[k] = str(v)
+                workflows.append(w_dict)
+            
+            count_q = "SELECT COUNT(*) FROM workflows WHERE org_id = $1"
+            c_args = [ctx.org_id]
+            if status_filter:
+                count_q += " AND status = $2"
+                c_args.append(status_filter)
+            total = await db.fetchval(count_q, *c_args)
+            
+            return {"workflows": workflows, "total": total, "limit": limit, "offset": offset}
+    except Exception as exc:
+        print(f"[GET /api/v1/workflows] Error: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to list workflows."
+        )
+
+
 @router.get("/api/v1/workflows/{shipmentId}")
 async def get_workflow_status(
     shipmentId: str,
@@ -828,6 +885,19 @@ async def get_workflow_status(
                     SELECT id, order_id, name, status, current_step, started_at, completed_at
                     FROM workflows
                     WHERE order_id = $1 AND org_id = $2
+                    """,
+                    target_uuid,
+                    ctx.org_id
+                )
+                
+            # 4. Try as approval_id (Reference ID)
+            if not row:
+                row = await db.fetchrow(
+                    """
+                    SELECT w.id, w.order_id, w.name, w.status, w.current_step, w.started_at, w.completed_at
+                    FROM workflows w
+                    JOIN approval_requests ar ON w.id = ar.workflow_id
+                    WHERE ar.id = $1 AND w.org_id = $2
                     """,
                     target_uuid,
                     ctx.org_id
