@@ -3,6 +3,9 @@
 
 > **"AI operates workflows. Humans supervise."**
 
+![TradeOS](docs/logo.jpeg)
+![AI Agentic OS For Trade](docs/header_logo.png)
+
 TradeOS replaces manual export documentation, WhatsApp-based operations, and fragmented systems with an autonomous multi-agent AI layer for India–GCC trade corridors. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.
 --------------------------------------------------------------------------------
 
@@ -84,6 +87,8 @@ One documentation executive in a export or freight forwarding company using Trad
 ---
 
 ## Architecture Principles
+
+![System Architecture](docs/architecture-mermaid-diagram.png)
 
 | Principle | Why |
 |-----------|-----|
