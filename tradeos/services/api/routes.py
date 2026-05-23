@@ -867,23 +867,6 @@ async def get_workflow_status(
 @router.get("/api/v1/stream/kafka")
 async def stream_kafka_events():
     """SSE endpoint to stream Kafka messages to the browser for debugging."""
-    from aiokafka import AIOKafkaConsumer
-    from core.kafka_producer import get_kafka_bootstrap
-    import os
-
     async def event_generator():
-        bootstrap_servers = get_kafka_bootstrap()
-        consumer = AIOKafkaConsumer(
-            "workflow_events",
-            bootstrap_servers=bootstrap_servers,
-            auto_offset_reset="latest",
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
-        )
-        await consumer.start()
-        try:
-            async for msg in consumer:
-                yield f"data: {json.dumps(msg.value)}\n\n"
-        finally:
-            await consumer.stop()
-
+        yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")
