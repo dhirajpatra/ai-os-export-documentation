@@ -414,7 +414,6 @@ async def action_approval(
     Human approves / rejects / requests changes on a paused workflow.
     """
     from core.db import get_pool
-    from core.workflow_engine import get_engine
 
     pool = get_pool()
     async with pool.acquire() as db:
@@ -481,27 +480,52 @@ async def action_approval(
         )
 
         workflow_id = str(row["workflow_id"])
-        engine = get_engine(workflow_id)
+        resumed_status = "completed" if body.action == "approve" else "cancelled"
 
-        resumed_result: dict | None = None
-        if engine:
-            try:
-                resumed_result = await engine.resume_from_approval(
-                    approval_action=body.action,
-                    overrides=body.field_overrides or None,
+        # Update workflow status
+        await db.execute(
+            "UPDATE workflows SET status = $1 WHERE id = $2",
+            resumed_status,
+            row["workflow_id"],
+        )
+
+        if body.action == "approve" and row["order_id"]:
+            # Update order status
+            await db.execute(
+                "UPDATE orders SET status = 'documents_ready' WHERE id = $1",
+                row["order_id"],
+            )
+
+            # Fetch order & contact info for dispatch
+            order_row = await db.fetchrow(
+                """
+                SELECT o.order_number, o.currency, c.whatsapp
+                FROM orders o
+                LEFT JOIN contacts c ON o.buyer_id = c.id
+                WHERE o.id = $1
+                """,
+                row["order_id"],
+            )
+
+            if order_row and order_row["whatsapp"]:
+                msg = (
+                    f"✅ Your order has been confirmed and documents are ready.\n\n"
+                    f"Order: {order_row['order_number']}\n"
+                    f"ETA: 3 working days\n\n"
+                    "Documents will follow shortly. Thank you! 🚢"
                 )
-                print(f"[Approval] workflow {workflow_id} resumed → {resumed_result.get('status')}")
-            except Exception as exc:
-                print(f"[Approval] resume failed for workflow {workflow_id}: {exc}")
-        else:
-            print(f"[Approval] no live engine for workflow {workflow_id} — persisted only")
+                try:
+                    await WhatsAppService.send_text(to=order_row["whatsapp"], body=msg)
+                except Exception as exc:
+                    print(f"[Approval] WhatsApp dispatch failed: {exc}")
+                    resumed_status = "failed_dispatch"
 
     return {
         "approval_id":    str(approval_id),
         "action":         body.action,
         "new_status":     new_status,
         "workflow_id":    workflow_id,
-        "resumed_status": resumed_result.get("status") if resumed_result else "engine_not_found",
+        "resumed_status": resumed_status,
         "audit_id":       str(audit_id),
         "message":        f"Approval {body.action}d and workflow updated.",
     }
