@@ -481,8 +481,15 @@ async def action_approval(
         )
 
         workflow_id = str(row["workflow_id"])
-        resumed_result = None
-        print(f"[Approval] persisted to DB — workflow {workflow_id} was LangGraph (stateless after completion)")
+        engine = get_engine(workflow_id)
+
+        resumed_result: dict | None = None
+        if engine:
+            try:
+                resumed_result = await engine.resume_from_approval(
+                    approval_action=body.action,
+                    overrides=body.field_overrides or None,
+                )
                 print(f"[Approval] workflow {workflow_id} resumed → {resumed_result.get('status')}")
             except Exception as exc:
                 print(f"[Approval] resume failed for workflow {workflow_id}: {exc}")
