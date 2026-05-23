@@ -6,7 +6,9 @@
 ![TradeOS](docs/logo.jpeg)
 ![AI Agentic OS For Trade](docs/header_logo.png)
 
-TradeOS replaces manual export documentation, WhatsApp-based operations, and fragmented systems with an autonomous multi-agent AI layer for India–GCC trade corridors. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.
+
+`TradeOS` replaces manual export documentation, WhatsApp-based operations, and fragmented systems with an autonomous multi-agent AI layer for India–GCC trade corridors. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.
+
 --------------------------------------------------------------------------------
 
 Hi,
