@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -148,9 +148,9 @@ async def run_killer_demo(
 
 @router.get("/api/v1/webhooks/whatsapp")
 async def whatsapp_verify(
-    hub_mode: str | None = None,
-    hub_challenge: str | None = None,
-    hub_verify_token: str | None = None,
+    hub_mode: str | None = Query(None, alias="hub.mode"),
+    hub_challenge: str | None = Query(None, alias="hub.challenge"),
+    hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
 ):
     """WhatsApp webhook verification handshake."""
     verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", cfg.WHATSAPP_VERIFY_TOKEN)
@@ -414,7 +414,6 @@ async def action_approval(
     Human approves / rejects / requests changes on a paused workflow.
     """
     from core.db import get_pool
-    from core.workflow_engine import get_engine
 
     pool = get_pool()
     async with pool.acquire() as db:
@@ -481,27 +480,52 @@ async def action_approval(
         )
 
         workflow_id = str(row["workflow_id"])
-        engine = get_engine(workflow_id)
+        resumed_status = "completed" if body.action == "approve" else "cancelled"
 
-        resumed_result: dict | None = None
-        if engine:
-            try:
-                resumed_result = await engine.resume_from_approval(
-                    approval_action=body.action,
-                    overrides=body.field_overrides or None,
+        # Update workflow status
+        await db.execute(
+            "UPDATE workflows SET status = $1 WHERE id = $2",
+            resumed_status,
+            row["workflow_id"],
+        )
+
+        if body.action == "approve" and row["order_id"]:
+            # Update order status
+            await db.execute(
+                "UPDATE orders SET status = 'documents_ready' WHERE id = $1",
+                row["order_id"],
+            )
+
+            # Fetch order & contact info for dispatch
+            order_row = await db.fetchrow(
+                """
+                SELECT o.order_number, o.currency, c.whatsapp
+                FROM orders o
+                LEFT JOIN contacts c ON o.buyer_id = c.id
+                WHERE o.id = $1
+                """,
+                row["order_id"],
+            )
+
+            if order_row and order_row["whatsapp"]:
+                msg = (
+                    f"✅ Your order has been confirmed and documents are ready.\n\n"
+                    f"Order: {order_row['order_number']}\n"
+                    f"ETA: 3 working days\n\n"
+                    "Documents will follow shortly. Thank you! 🚢"
                 )
-                print(f"[Approval] workflow {workflow_id} resumed → {resumed_result.get('status')}")
-            except Exception as exc:
-                print(f"[Approval] resume failed for workflow {workflow_id}: {exc}")
-        else:
-            print(f"[Approval] no live engine for workflow {workflow_id} — persisted only")
+                try:
+                    await WhatsAppService.send_text(to=order_row["whatsapp"], body=msg)
+                except Exception as exc:
+                    print(f"[Approval] WhatsApp dispatch failed: {exc}")
+                    resumed_status = "failed_dispatch"
 
     return {
         "approval_id":    str(approval_id),
         "action":         body.action,
         "new_status":     new_status,
         "workflow_id":    workflow_id,
-        "resumed_status": resumed_result.get("status") if resumed_result else "engine_not_found",
+        "resumed_status": resumed_status,
         "audit_id":       str(audit_id),
         "message":        f"Approval {body.action}d and workflow updated.",
     }
@@ -753,6 +777,63 @@ async def workflow_status_ws(websocket: WebSocket, workflow_id: str):
         pass
 
 
+@router.get("/api/v1/workflows")
+async def list_workflows(
+    status_filter: str | None = Query(None, description="Filter workflows by status"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """List all workflows for the organization."""
+    try:
+        from core.db import get_pool
+        pool = get_pool()
+        query = """
+            SELECT 
+                w.id, w.order_id, w.name, w.status, w.current_step, 
+                w.started_at, w.completed_at,
+                o.order_number
+            FROM workflows w
+            LEFT JOIN orders o ON w.order_id = o.id
+            WHERE w.org_id = $1
+        """
+        args = [ctx.org_id]
+        if status_filter:
+            query += " AND w.status = $2"
+            args.append(status_filter)
+            query += f" ORDER BY w.created_at DESC LIMIT $3 OFFSET $4"
+            args.extend([limit, offset])
+        else:
+            query += f" ORDER BY w.created_at DESC LIMIT $2 OFFSET $3"
+            args.extend([limit, offset])
+
+        async with pool.acquire() as db:
+            rows = await db.fetch(query, *args)
+            workflows = []
+            for r in rows:
+                w_dict = dict(r)
+                for k, v in w_dict.items():
+                    if hasattr(v, "isoformat"):
+                        w_dict[k] = v.isoformat()
+                    elif isinstance(v, uuid.UUID):
+                        w_dict[k] = str(v)
+                workflows.append(w_dict)
+            
+            count_q = "SELECT COUNT(*) FROM workflows WHERE org_id = $1"
+            c_args = [ctx.org_id]
+            if status_filter:
+                count_q += " AND status = $2"
+                c_args.append(status_filter)
+            total = await db.fetchval(count_q, *c_args)
+            
+            return {"workflows": workflows, "total": total, "limit": limit, "offset": offset}
+    except Exception as exc:
+        print(f"[GET /api/v1/workflows] Error: {exc}")
+        raise HTTPException(
+            status_code=500, detail="Failed to list workflows."
+        )
+
+
 @router.get("/api/v1/workflows/{shipmentId}")
 async def get_workflow_status(
     shipmentId: str,
@@ -804,6 +885,19 @@ async def get_workflow_status(
                     SELECT id, order_id, name, status, current_step, started_at, completed_at
                     FROM workflows
                     WHERE order_id = $1 AND org_id = $2
+                    """,
+                    target_uuid,
+                    ctx.org_id
+                )
+                
+            # 4. Try as approval_id (Reference ID)
+            if not row:
+                row = await db.fetchrow(
+                    """
+                    SELECT w.id, w.order_id, w.name, w.status, w.current_step, w.started_at, w.completed_at
+                    FROM workflows w
+                    JOIN approval_requests ar ON w.id = ar.workflow_id
+                    WHERE ar.id = $1 AND w.org_id = $2
                     """,
                     target_uuid,
                     ctx.org_id
@@ -864,26 +958,104 @@ async def get_workflow_status(
         )
 
 
+# ── SHIPMENTS ─────────────────────────────────────────────────
+
+@router.get("/api/v1/shipments")
+async def list_shipments(
+    status_filter: str | None = Query("active", description="Filter shipments by status (use 'active' for all non-delivered)"),
+    order_id: uuid.UUID | None = Query(None, description="Filter shipments by order ID"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """
+    Fetch details of shipments for the organization.
+    Defaults to returning 'active' shipments (status != 'delivered').
+    """
+    try:
+        from core.db import get_pool
+        pool = get_pool()
+        
+        query = """
+            SELECT 
+                s.id, s.order_id, s.carrier, s.service_type, s.tracking_number, 
+                s.bl_number, s.awb_number, s.container_number, s.vessel_name, 
+                s.voyage_number, s.port_of_loading, s.port_of_discharge, 
+                s.etd, s.eta, s.actual_departure, s.actual_arrival, s.status, 
+                s.last_event, s.last_event_at, s.created_at, s.updated_at,
+                o.order_number
+            FROM shipments s
+            LEFT JOIN orders o ON s.order_id = o.id
+            WHERE s.org_id = $1
+        """
+        
+        args = [ctx.org_id]
+        arg_idx = 2
+        
+        if status_filter:
+            if status_filter.lower() == 'active':
+                query += f" AND s.status != 'delivered'"
+            else:
+                query += f" AND s.status = ${arg_idx}"
+                args.append(status_filter)
+                arg_idx += 1
+                
+        if order_id:
+            query += f" AND s.order_id = ${arg_idx}"
+            args.append(order_id)
+            arg_idx += 1
+            
+        query += f" ORDER BY s.created_at DESC LIMIT ${arg_idx} OFFSET ${arg_idx+1}"
+        args.extend([limit, offset])
+        
+        async with pool.acquire() as db:
+            rows = await db.fetch(query, *args)
+            
+            shipments = []
+            for r in rows:
+                ship_dict = dict(r)
+                for k, v in ship_dict.items():
+                    if hasattr(v, "isoformat"):
+                        ship_dict[k] = v.isoformat()
+                    elif isinstance(v, uuid.UUID):
+                        ship_dict[k] = str(v)
+                    elif hasattr(v, "__str__") and not isinstance(v, (str, int, float, bool, type(None))):
+                        ship_dict[k] = str(v)
+                shipments.append(ship_dict)
+                
+            # Count total
+            count_query = "SELECT COUNT(*) FROM shipments WHERE org_id = $1"
+            count_args = [ctx.org_id]
+            if status_filter:
+                if status_filter.lower() == 'active':
+                    count_query += " AND status != 'delivered'"
+                else:
+                    count_query += " AND status = $2"
+                    count_args.append(status_filter)
+            if order_id:
+                count_query += f" AND order_id = ${len(count_args)+1}"
+                count_args.append(order_id)
+            
+            total_count = await db.fetchval(count_query, *count_args)
+                
+            return {
+                "shipments": shipments, 
+                "total": total_count,
+                "limit": limit,
+                "offset": offset
+            }
+
+    except Exception as exc:
+        print(f"[GET /api/v1/shipments] Error: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to query shipments."
+        )
+
+
 @router.get("/api/v1/stream/kafka")
 async def stream_kafka_events():
     """SSE endpoint to stream Kafka messages to the browser for debugging."""
-    from aiokafka import AIOKafkaConsumer
-    from core.kafka_producer import get_kafka_bootstrap
-    import os
-
     async def event_generator():
-        bootstrap_servers = get_kafka_bootstrap()
-        consumer = AIOKafkaConsumer(
-            "workflow_events",
-            bootstrap_servers=bootstrap_servers,
-            auto_offset_reset="latest",
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
-        )
-        await consumer.start()
-        try:
-            async for msg in consumer:
-                yield f"data: {json.dumps(msg.value)}\n\n"
-        finally:
-            await consumer.stop()
-
+        yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")

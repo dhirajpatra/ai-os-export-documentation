@@ -440,11 +440,15 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         order_data = {
             "buyer":     ctx.extracted_po.get("buyer_name"),
             "country":   ctx.extracted_po.get("buyer_country"),
+            "address":   ctx.extracted_po.get("buyer_address"),
+            "vat_trn":   ctx.extracted_po.get("buyer_vat"),
             "items":     ctx.hs_validations.get("validations", []),
             "currency":  ctx.extracted_po.get("currency", "USD"),
             "terms":     ctx.extracted_po.get("payment_terms"),
             "incoterms": ctx.extracted_po.get("incoterms"),
             "port":      ctx.extracted_po.get("destination_port"),
+            "packing_instructions": ctx.extracted_po.get("packing_requirements"),
+            "lc_details": ctx.extracted_po.get("lc_details"),
         }
 
         # Run each doc independently — one failure must not block the other
