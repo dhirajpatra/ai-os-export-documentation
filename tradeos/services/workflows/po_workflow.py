@@ -21,6 +21,7 @@ from typing import TypedDict, Annotated, Optional
 from datetime import datetime
 from langgraph.graph import StateGraph, START, END
 
+from services.sse.sse_bus import push_event, close_channel
 from services.agents.po_extraction import POExtractionAgent
 from services.agents.hs_validation import HSCodeValidationAgent
 from services.agents.doc_generation import DocumentGenerationAgent
@@ -149,6 +150,9 @@ class KillerDemoWorkflow:
     # ── Nodes ─────────────────────────────────────────────
 
     async def node_po_extraction(self, state: WorkflowState) -> dict:
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "po_extraction", "running")
+
         logs  = await self._log(state, "po_extraction", "running")
         agent = POExtractionAgent(self.org_id)
 
@@ -165,11 +169,15 @@ class KillerDemoWorkflow:
         })
         extracted = extraction["data"]
 
-        logs += await self._log(state, "po_extraction", "done", {
+        done_data = {
             "confidence": extracted.get("confidence"),
             "items":      len(extracted.get("items", [])),
             "warnings":   extracted.get("warnings", []),
-        })
+            "buyer_name": extracted.get("buyer_name"),
+            "destination_port": extracted.get("destination_port"),
+        }
+        logs += await self._log(state, "po_extraction", "done", done_data)
+        await push_event(wf_id, "po_extraction", "done", done_data)
 
         return {
             "extracted":          extracted,
@@ -183,6 +191,9 @@ class KillerDemoWorkflow:
         Use ClarificationEngine to find missing fields.
         Collect questions from extracted.requires_clarification AND ClarificationEngine.
         """
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "clarification_check", "running")
+
         logs      = await self._log(state, "clarification_check", "running")
         extracted = state["extracted"]
         source    = state.get("source", "whatsapp")
@@ -217,12 +228,14 @@ class KillerDemoWorkflow:
             "can_proceed":     len(blocking_fields) == 0,
         }
 
-        logs += await self._log(state, "clarification_check", "done", {
+        done_data = {
             "blocked":         clarification_result["blocked"],
             "can_proceed":     clarification_result["can_proceed"],
             "question_count":  len(all_questions),
             "blocking_fields": blocking_fields,
-        })
+        }
+        logs += await self._log(state, "clarification_check", "done", done_data)
+        await push_event(wf_id, "clarification_check", "done", done_data)
 
         return {
             "clarification_result": clarification_result,
@@ -235,9 +248,12 @@ class KillerDemoWorkflow:
         Send clarification questions to buyer via WhatsApp.
         Workflow pauses here — resumes when buyer replies.
         """
-        logs      = await self._log(state, "ask_buyer", "running")
+        wf_id     = state["workflow_id"]
         questions = state.get("pending_questions", [])
         wa        = state.get("buyer_whatsapp")
+
+        await push_event(wf_id, "ask_buyer", "running", {"question_count": len(questions)})
+        logs = await self._log(state, "ask_buyer", "running")
 
         if wa and questions:
             # Build consolidated WhatsApp message
@@ -260,11 +276,13 @@ class KillerDemoWorkflow:
             except Exception as exc:
                 print(f"[ask_buyer] WhatsApp send failed: {exc}")
 
-        logs += await self._log(state, "ask_buyer", "paused", {
+        paused_data = {
             "questions_sent": len(questions),
             "buyer_wa":       wa,
             "status":         "waiting_for_buyer_reply",
-        })
+        }
+        logs += await self._log(state, "ask_buyer", "paused", paused_data)
+        await push_event(wf_id, "ask_buyer", "paused", paused_data)
 
         return {
             "clarification_sent": True,
@@ -273,6 +291,9 @@ class KillerDemoWorkflow:
         }
 
     async def node_hs_validation(self, state: WorkflowState) -> dict:
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "hs_validation", "running")
+
         logs      = await self._log(state, "hs_validation", "running")
         agent     = HSCodeValidationAgent(self.org_id)
         extracted = state["extracted"]
@@ -295,24 +316,30 @@ class KillerDemoWorkflow:
                 if c.get("question") and c["question"] not in hs_questions:
                     hs_questions.append(c["question"])
 
-        logs += await self._log(state, "hs_validation", "done", {
+        done_data = {
             "clearance":         hs_data.get("overall_clearance"),
             "flags":             len(risk_flags),
             "hs_clarifications": len(hs_questions),
-        })
+            "items_validated":   len(hs_data.get("validations", [])),
+        }
+        logs += await self._log(state, "hs_validation", "done", done_data)
+        await push_event(wf_id, "hs_validation", "done", done_data)
 
         # If HS flagged blocking clarifications, add to pending
         existing_pending = state.get("pending_questions", [])
         merged_pending   = existing_pending + [q for q in hs_questions if q not in existing_pending]
 
         return {
-            "hs_data":         hs_data,
-            "risk_flags":      risk_flags,
+            "hs_data":           hs_data,
+            "risk_flags":        risk_flags,
             "pending_questions": merged_pending,
-            "steps_log":       logs,
+            "steps_log":         logs,
         }
 
     async def node_doc_generation(self, state: WorkflowState) -> dict:
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "doc_generation", "running")
+
         logs      = await self._log(state, "doc_generation", "running")
         agent     = DocumentGenerationAgent(self.org_id)
         extracted = state["extracted"]
@@ -383,11 +410,16 @@ class KillerDemoWorkflow:
         existing_pending = state.get("pending_questions", [])
         merged_pending   = existing_pending + [q for q in doc_questions if q not in existing_pending]
 
-        logs += await self._log(state, "doc_generation", "done", {
-            "docs":              ["commercial_invoice", "packing_list"],
-            "confidence":        new_confidence,
-            "doc_clarifications":len(doc_questions),
-        })
+        done_data = {
+            "docs":               ["commercial_invoice", "packing_list"],
+            "confidence":         new_confidence,
+            "doc_clarifications": len(doc_questions),
+            "invoice_number":     invoice_data.get("invoice_number"),
+            "grand_total":        invoice_data.get("grand_total"),
+            "currency":           invoice_data.get("currency", "USD"),
+        }
+        logs += await self._log(state, "doc_generation", "done", done_data)
+        await push_event(wf_id, "doc_generation", "done", done_data)
 
         return {
             "documents": {
@@ -400,6 +432,9 @@ class KillerDemoWorkflow:
         }
 
     async def node_hitl_evaluation(self, state: WorkflowState) -> dict:
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "hitl_evaluation", "running")
+
         logs          = await self._log(state, "hitl_evaluation", "running")
         hitl_decision = HITLOrchestrator.evaluate(
             "doc_generation",
@@ -410,6 +445,15 @@ class KillerDemoWorkflow:
 
         approval_required = hitl_decision["requires_human"]
         approval_id       = str(uuid.uuid4()) if approval_required else None
+
+        done_data = {
+            "decision":       hitl_decision["decision"],
+            "requires_human": approval_required,
+            "approval_id":    approval_id,
+            "reason":         hitl_decision["reason"],
+            "confidence":     state["overall_confidence"],
+        }
+        await push_event(wf_id, "hitl_evaluation", "done", done_data)
 
         # If there are pending clarification questions AND human review triggered,
         # send them now as part of the review notification
@@ -446,12 +490,14 @@ class KillerDemoWorkflow:
                 except Exception as exc:
                     print(f"[hitl_evaluation] WhatsApp notify failed: {exc}")
 
-            logs += await self._log(state, "awaiting_human", "paused", {
+            paused_data = {
                 "approval_id": approval_id,
                 "decision":    hitl_decision["decision"],
                 "reason":      hitl_decision["reason"],
                 "confidence":  state["overall_confidence"],
-            })
+            }
+            logs += await self._log(state, "awaiting_human", "paused", paused_data)
+            await push_event(wf_id, "awaiting_human", "paused", paused_data)
 
         return {
             "hitl_decision": hitl_decision,
@@ -461,6 +507,9 @@ class KillerDemoWorkflow:
         }
 
     async def node_dispatch(self, state: WorkflowState) -> dict:
+        wf_id = state["workflow_id"]
+        await push_event(wf_id, "dispatch", "running")
+
         logs = await self._log(state, "dispatch", "running")
         wa   = state.get("buyer_whatsapp")
 
@@ -488,7 +537,10 @@ class KillerDemoWorkflow:
             except Exception as exc:
                 print(f"[dispatch] WhatsApp send failed: {exc}")
 
-        logs += await self._log(state, "dispatch", "done", {"channel": "whatsapp"})
+        done_data = {"channel": "whatsapp"}
+        logs += await self._log(state, "dispatch", "done", done_data)
+        await push_event(wf_id, "dispatch", "done", done_data)
+
         return {"steps_log": logs}
 
     # ── Routing functions ─────────────────────────────────
@@ -538,6 +590,9 @@ class KillerDemoWorkflow:
         }
 
         final_state = await self.app.ainvoke(initial_state)
+
+        # Signal SSE consumers that the workflow is complete
+        await close_channel(initial_state["workflow_id"])
 
         return {
             "workflow_id":        final_state["workflow_id"],

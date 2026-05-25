@@ -16,6 +16,7 @@ from services.agents.doc_generation import DocumentGenerationAgent
 from services.integrations.whatsapp import WhatsAppService
 from services.workflows.po_workflow import KillerDemoWorkflow
 from services.api.main import DocumentIntelligenceEngine, HITLOrchestrator, render_readme_html, get_org_context
+from services.sse.sse_bus import create_channel, sse_stream
 
 router = APIRouter()
 
@@ -77,7 +78,18 @@ class MemoryUpsertRequest(BaseModel):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "version": cfg.VERSION, "service": cfg.APP_NAME}
+    from core.redis_client import redis_ping
+ 
+    redis_ok = await redis_ping()
+ 
+    return {
+        "status":  "ok" if redis_ok else "degraded",
+        "version": cfg.VERSION,
+        "service": cfg.APP_NAME,
+        "deps": {
+            "redis": "ok" if redis_ok else "unreachable",
+        },
+    }
 
 
 @router.get("/", response_class=HTMLResponse)

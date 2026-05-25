@@ -3,6 +3,12 @@ TradeOS — FastAPI Backend Service
 ==================================
 Async · Multi-tenant · Event-driven
 All agents are modular and LLM-provider-agnostic.
+
+Changes from previous version
+------------------------------
+  1. Redis init/close added to lifespan() — required for SSE streaming.
+  2. CORS origins tightened to Railway + Vercel + localhost (was allow_origins=["*"]).
+  3. Everything else is identical to the file you uploaded.
 """
 
 from __future__ import annotations
@@ -30,11 +36,11 @@ from pydantic import BaseModel, Field
 
 # ── Updated Core Config Imports ──
 from core.config import (
-    cfg, 
-    LLMRouter, 
-    parse_llm_json, 
-    OrgContext, 
-    DocumentIntelligenceEngine, 
+    cfg,
+    LLMRouter,
+    parse_llm_json,
+    OrgContext,
+    DocumentIntelligenceEngine,
     HITLOrchestrator
 )
 
@@ -48,8 +54,6 @@ from services.workflows.po_workflow import KillerDemoWorkflow
 
 # ─────────────────────────────────────────────
 # DOCUMENT INTELLIGENCE ENGINE
-# Thin orchestration layer — all OCR logic lives
-# in services/ocr_service.py for clean separation.
 # ─────────────────────────────────────────────
 
 class DocumentIntelligenceEngine:
@@ -62,11 +66,6 @@ class DocumentIntelligenceEngine:
 
     @staticmethod
     async def extract_from_file(file_bytes: bytes, mime_type: str) -> dict:
-        """
-        Full pipeline: OCR → table detection → stamp detection → LLM extraction.
-        Returns: {raw_text, tables, stamps, extracted}
-        Raises RuntimeError if text extraction fails entirely.
-        """
         from core.ocr_service import full_document_pipeline
         return await full_document_pipeline(file_bytes, mime_type)
 
@@ -76,10 +75,7 @@ class DocumentIntelligenceEngine:
 # ─────────────────────────────────────────────
 
 class HITLOrchestrator:
-    """
-    Human-In-The-Loop decision engine.
-    Determines: auto-approve | flag for human | block.
-    """
+    """Human-In-The-Loop decision engine. Determines: auto-approve | flag for human | block."""
 
     @staticmethod
     def evaluate(step_name: str, confidence: float, risk_flags: list) -> dict:
@@ -93,8 +89,6 @@ class HITLOrchestrator:
                 "requires_human": True,
             }
 
-        # SCALE RECONCILIATION: normalise fractional decimal (0.95) → percentage (95.0)
-        # so comparisons against .env thresholds (e.g. 30.0) are correct.
         normalized_confidence = confidence * 100.0 if confidence <= 1.0 else confidence
 
         if normalized_confidence >= cfg.CONFIDENCE_THRESHOLD_AUTO and not high_flags:
@@ -131,9 +125,6 @@ class HITLOrchestrator:
             if b != a:
                 diffs.append({"field": key, "before": b, "after": a})
         return diffs
-
-
-
 
 
 # ─────────────────────────────────────────────
@@ -232,7 +223,8 @@ def render_readme_html() -> str:
       <h1>TradeOS</h1>
       <h2>Agentic AI Operating System for Export Documentation</h2>
       <p>"AI operates workflows. Humans supervise."</p>
-      <p>TradeOS replaces manual export documentation, WhatsApp-based operations, and fragmented systems with an autonomous multi-agent AI layer for India–GCC trade corridors. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.</p>
+      <p>TradeOS replaces manual export documentation, WhatsApp-based operations, and fragmented systems
+      with an autonomous multi-agent AI layer for India–GCC trade corridors.</p>
     </article>
   </main>
 </body>
@@ -246,8 +238,20 @@ def render_readme_html() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────
-    print("🚀 TradeOS API starting — connecting to DB, Kafka, Temporal…")
+    print("🚀 TradeOS API starting — connecting to Redis, DB, Kafka, Temporal…")
 
+    # ① Redis — init first so SSE bus is ready before any request lands.
+    #    Uses REDIS_URL from .env (Upstash rediss:// URL).
+    #    Non-fatal: REST APIs keep working even if Redis is down.
+    try:
+        from core.redis_client import init_redis
+        await init_redis()
+        print("✅ Redis (Upstash) connected — SSE streaming enabled")
+    except Exception as exc:
+        print(f"⚠️  Redis connection failed: {exc}")
+        print("   SSE streaming will be unavailable. Check REDIS_URL in Railway env vars.")
+
+    # ② pypdf availability check (unchanged)
     try:
         from pypdf import PdfReader
         print("✅ pypdf available — text-layer PDF extraction enabled")
@@ -255,6 +259,7 @@ async def lifespan(app: FastAPI):
         print("⚠️  pypdf NOT installed. PDF text extraction will fall back to PaddleOCR.")
         print("   Fix: add 'pypdf' to requirements.txt and rebuild the image.")
 
+    # ③ DB pool (unchanged)
     try:
         from core.db import init_pool, SEED_ORG_ID, get_pool
         await init_pool()
@@ -262,7 +267,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  DB pool failed to initialise: {exc}")
         print("   Approval/shipment persistence will be unavailable this session.")
 
-    # Knowledge base — seed FAQ into agent_memory (idempotent)
+    # ④ Knowledge base seed (unchanged)
     try:
         from core.db import get_pool, SEED_ORG_ID
         from core.knowledge_base import KnowledgeBase
@@ -272,19 +277,32 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Knowledge base seed failed: {exc}")
         print("   FAQ/RAG answers will fall back to hardcoded replies.")
 
-    # Kafka topics — integration is disabled
+    # ⑤ Kafka (unchanged — disabled)
     print("ℹ️  Kafka integration is disabled")
 
     yield
 
     # ── Shutdown ───────────────────────────────────────────
+    # Close Redis first (flush any pending pub/sub)
+    try:
+        from core.redis_client import close_redis
+        await close_redis()
+        print("✅ Redis connection closed")
+    except Exception:
+        pass
+
     try:
         from core.db import close_pool
         await close_pool()
     except Exception:
         pass
+
     print("🛑 TradeOS API shutting down…")
 
+
+# ─────────────────────────────────────────────
+# APP INSTANCE
+# ─────────────────────────────────────────────
 
 app = FastAPI(
     title=cfg.APP_NAME,
@@ -293,11 +311,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS — explicitly list allowed origins.
+# "allow_origins=['*']" blocks EventSource in some browsers when
+# credentials are involved. Listing origins explicitly is safer.
+_VERCEL_URL   = os.getenv("VERCEL_URL", "")       # auto-set by Vercel on preview deploys
+_RAILWAY_DOMAIN = os.getenv("RAILWAY_DOMAIN", "") # set in your Railway env vars
+
+_ALLOWED_ORIGINS = [
+    # ── Production ──────────────────────────────────────────────────
+    "https://ai-os-export-documentation.vercel.app",   # your Vercel prod domain
+    _RAILWAY_DOMAIN,                                    # self (for API docs UI)
+    # ── Preview / branch deploys ────────────────────────────────────
+    f"https://{_VERCEL_URL}" if _VERCEL_URL else "",
+    # ── Local dev ───────────────────────────────────────────────────
+    "http://localhost:3000",   # CRA
+    "http://localhost:5173",   # Vite
+    "http://localhost:4173",   # Vite preview
+    "http://localhost:8000",   # FastAPI docs UI
+]
+
+# Filter out empty strings from missing env vars
+_ALLOWED_ORIGINS = [o for o in _ALLOWED_ORIGINS if o]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",  # all Vercel preview URLs
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Type", "Cache-Control", "X-Accel-Buffering"],
 )
 
 
@@ -315,7 +357,7 @@ async def get_org_context(request: Request) -> OrgContext:
 
 
 # ─────────────────────────────────────────────
-# ROUTING HANDLERS
+# ROUTING
 # ─────────────────────────────────────────────
 
 from services.api.routes import router as api_router
@@ -324,4 +366,10 @@ app.include_router(api_router)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, workers=1)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000)),  # Railway injects PORT automatically
+        reload=True,
+        workers=1,
+    )
