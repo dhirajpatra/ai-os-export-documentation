@@ -503,13 +503,26 @@ async def get_approval_detail(
             )
 
         # ── Step 5: format items list into readable strings ───────────────
-        items       = extracted_data.get("items", [])
+        ci_data = extracted_data.get("commercial_invoice", {})
+        if ci_data:
+            buyer_name = ci_data.get("importer", {}).get("name", "N/A")
+            destination = ci_data.get("port_of_discharge", "N/A")
+            payment_terms = ci_data.get("payment_terms", "N/A")
+            incoterms = ci_data.get("incoterms", "N/A")
+            items = ci_data.get("items", [])
+        else:
+            buyer_name = extracted_data.get("buyer_name", "N/A")
+            destination = extracted_data.get("destination_port", "N/A")
+            payment_terms = extracted_data.get("payment_terms", "N/A")
+            incoterms = extracted_data.get("incoterms", "N/A")
+            items = extracted_data.get("items", [])
+
         product_str = (
             ", ".join([item.get("description", "") for item in items])
             if items else "N/A"
         )
         quantity_str = (
-            str(sum([float(item.get("qty", 0)) for item in items]))
+            str(sum([float(item.get("quantity", item.get("qty", 0))) for item in items]))
             if items else "N/A"
         )
         if items and items[0].get("unit"):
@@ -523,13 +536,14 @@ async def get_approval_detail(
                 "text":   row["po_raw_text"] or "Original document attached.",
             },
             "extracted_data": {
-                "buyer_name":    extracted_data.get("buyer_name",       "N/A"),
+                "buyer_name":    buyer_name,
                 "product":       product_str,
                 "quantity":      quantity_str,
-                "destination":   extracted_data.get("destination_port", "N/A"),
-                "payment_terms": extracted_data.get("payment_terms",    "N/A"),
-                "incoterms":     extracted_data.get("incoterms",        "N/A"),
+                "destination":   destination,
+                "payment_terms": payment_terms,
+                "incoterms":     incoterms,
             },
+            "raw_extracted_data": extracted_data,
             "confidence_scores": confidence_scores,
             "review_reason":     row["description"],
             "risk_flags": (
