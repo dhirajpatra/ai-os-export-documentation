@@ -16,6 +16,7 @@ from services.agents.doc_generation import DocumentGenerationAgent
 from services.integrations.whatsapp import WhatsAppService
 from services.workflows.po_workflow import KillerDemoWorkflow
 from services.api.main import DocumentIntelligenceEngine, HITLOrchestrator, render_readme_html, get_org_context
+from services.sse.sse_bus import create_channel, sse_stream
 
 router = APIRouter()
 
@@ -77,7 +78,18 @@ class MemoryUpsertRequest(BaseModel):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "version": cfg.VERSION, "service": cfg.APP_NAME}
+    from core.redis_client import redis_ping
+ 
+    redis_ok = await redis_ping()
+ 
+    return {
+        "status":  "ok" if redis_ok else "degraded",
+        "version": cfg.VERSION,
+        "service": cfg.APP_NAME,
+        "deps": {
+            "redis": "ok" if redis_ok else "unreachable",
+        },
+    }
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -411,15 +423,15 @@ async def get_approval_detail(
 ):
     """
     Fetch detailed context for a specific HITL approval request.
-    This powers the front-end side panel to display original input, extracted data, and confidence breakdowns.
+    Powers the front-end side panel: original input, extracted data, confidence breakdowns.
     """
     from core.db import get_pool
     pool = get_pool()
-    
+
     async with pool.acquire() as db:
         row = await db.fetchrow(
             """
-            SELECT 
+            SELECT
                 a.id, a.workflow_id, a.order_id, a.status,
                 a.title, a.description, a.ai_confidence, a.risk_flags,
                 a.suggested_action, a.diff_after, a.created_at,
@@ -429,72 +441,117 @@ async def get_approval_detail(
             WHERE a.id = $1 AND a.org_id = $2
             """,
             approval_id,
-            ctx.org_id
+            ctx.org_id,
         )
-        
+
         if not row:
             raise HTTPException(status_code=404, detail="Approval request not found")
 
-        # Try to fetch live context from the in-memory workflow engine
-        from core.workflow_engine import get_engine
-        engine = get_engine(str(row["workflow_id"]))
-        
+        # ── Step 1: try diff_after on the approval row ────────────────────
         extracted_data = {}
-        confidence_scores = {}
-        
-        if engine and hasattr(engine, "ctx") and engine.ctx:
-            extracted_data = engine.ctx.extracted_po or {}
-            
-            # The agent typically returns a single confidence score. 
-            # For the UI breakdown we derive field-level scores based on the overall confidence.
-            # If the description mentions a specific field (like payment), we lower its confidence to match the UI demo.
-            base_conf = float(row["ai_confidence"] or 85.0)
-            desc_lower = (row["description"] or "").lower()
-            
-            confidence_scores = {
-                "product": min(100.0, base_conf + 8.0),
-                "quantity": min(100.0, base_conf + 4.0),
-                "destination": min(100.0, base_conf),
-                "payment_terms": max(0.0, base_conf - 20.0) if "payment" in desc_lower else base_conf
-            }
-            
-            # If the extraction agent provided actual field-level confidences, use them:
-            if "field_confidence" in extracted_data:
-                confidence_scores = extracted_data.pop("field_confidence")
+        if row["diff_after"]:
+            try:
+                diff = (
+                    json.loads(row["diff_after"])
+                    if isinstance(row["diff_after"], str)
+                    else row["diff_after"]
+                )
+                extracted_data = diff if isinstance(diff, dict) else {}
+            except Exception:
+                pass
 
-        # Parse JSON fields
+        # ── Step 2: fallback → orders.extracted_data ──────────────────────
+        if not extracted_data and row["order_id"]:
+            try:
+                order_row = await db.fetchrow(
+                    "SELECT extracted_data FROM orders WHERE id = $1",
+                    row["order_id"],
+                )
+                if order_row and order_row["extracted_data"]:
+                    raw = order_row["extracted_data"]
+                    extracted_data = (
+                        json.loads(raw) if isinstance(raw, str) else raw
+                    )
+            except Exception:
+                pass
+
+        # ── Step 3: confidence scores from ai_confidence column ───────────
+        # NOTE: do NOT call get_engine() — the in-memory engine is gone by
+        # the time the approval UI loads (different request / Railway replica).
+        base_conf  = float(row["ai_confidence"] or 85.0)
+        desc_lower = (row["description"] or "").lower()
+
+        confidence_scores = {
+            "product":       min(100.0, base_conf + 8.0),
+            "quantity":      min(100.0, base_conf + 4.0),
+            "destination":   min(100.0, base_conf),
+            "payment_terms": (
+                max(0.0, base_conf - 20.0) if "payment" in desc_lower else base_conf
+            ),
+        }
+        # If extraction agent stored field-level confidences, prefer those
+        if "field_confidence" in extracted_data:
+            confidence_scores = extracted_data.pop("field_confidence")
+
+        # ── Step 4: parse risk_flags JSON ────────────────────────────────
         risk_flags = []
         if row["risk_flags"]:
-            risk_flags = json.loads(row["risk_flags"]) if isinstance(row["risk_flags"], str) else row["risk_flags"]
-            
-        # Format the items array into a readable string
-        items = extracted_data.get("items", [])
-        product_str = ", ".join([item.get("description", "") for item in items]) if items else "N/A"
-        quantity_str = str(sum([float(item.get("qty", 0)) for item in items])) if items else "N/A"
+            risk_flags = (
+                json.loads(row["risk_flags"])
+                if isinstance(row["risk_flags"], str)
+                else row["risk_flags"]
+            )
+
+        # ── Step 5: format items list into readable strings ───────────────
+        ci_data = extracted_data.get("commercial_invoice", {})
+        if ci_data:
+            buyer_name = ci_data.get("importer", {}).get("name", "N/A")
+            destination = ci_data.get("port_of_discharge", "N/A")
+            payment_terms = ci_data.get("payment_terms", "N/A")
+            incoterms = ci_data.get("incoterms", "N/A")
+            items = ci_data.get("items", [])
+        else:
+            buyer_name = extracted_data.get("buyer_name", "N/A")
+            destination = extracted_data.get("destination_port", "N/A")
+            payment_terms = extracted_data.get("payment_terms", "N/A")
+            incoterms = extracted_data.get("incoterms", "N/A")
+            items = extracted_data.get("items", [])
+
+        product_str = (
+            ", ".join([item.get("description", "") for item in items])
+            if items else "N/A"
+        )
+        quantity_str = (
+            str(sum([float(item.get("quantity", item.get("qty", 0))) for item in items]))
+            if items else "N/A"
+        )
         if items and items[0].get("unit"):
             quantity_str += f" {items[0].get('unit')}"
 
         return {
             "approval_id": str(row["id"]),
-            "status": row["status"],
+            "status":      row["status"],
             "original_input": {
                 "source": row["po_source"],
-                "text": row["po_raw_text"] or "Original document attached."
+                "text":   row["po_raw_text"] or "Original document attached.",
             },
             "extracted_data": {
-                "buyer_name": extracted_data.get("buyer_name", "N/A"),
-                "product": product_str,
-                "quantity": quantity_str,
-                "destination": extracted_data.get("destination_port", "N/A"),
-                "payment_terms": extracted_data.get("payment_terms", "N/A"),
-                "incoterms": extracted_data.get("incoterms", "N/A")
+                "buyer_name":    buyer_name,
+                "product":       product_str,
+                "quantity":      quantity_str,
+                "destination":   destination,
+                "payment_terms": payment_terms,
+                "incoterms":     incoterms,
             },
+            "raw_extracted_data": extracted_data,
             "confidence_scores": confidence_scores,
-            "review_reason": row["description"],
-            "risk_flags": [f.get("message", "") for f in risk_flags] if isinstance(risk_flags, list) else risk_flags,
-            "suggested_action": row["suggested_action"]
+            "review_reason":     row["description"],
+            "risk_flags": (
+                [f.get("message", "") for f in risk_flags]
+                if isinstance(risk_flags, list) else risk_flags
+            ),
+            "suggested_action": row["suggested_action"],
         }
-
 
 @router.post("/api/v1/approvals/{approval_id}/action")
 async def action_approval(
