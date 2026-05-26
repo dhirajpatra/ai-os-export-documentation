@@ -122,6 +122,45 @@ async def run_killer_demo(
     """
     from core.workflow_engine import build_po_to_dispatch_workflow
 
+    file_bytes = await file.read() if file else None
+    if not file_bytes and not (po_text or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Send either po_text as a form field or upload a file.",
+        )
+
+    raw_input = {
+        "raw_text":       po_text or "",
+        "buyer_whatsapp": buyer_whatsapp,
+        "buyer_email":    buyer_email,
+    }
+    if file_bytes:
+        raw_input["file_bytes"] = file_bytes
+        raw_input["mime_type"]  = file.content_type if file else "application/pdf"
+
+    source = "file" if file_bytes else "whatsapp" if buyer_whatsapp else "portal"
+
+    engine, wf_ctx = build_po_to_dispatch_workflow(
+        org_id=str(ctx.org_id),
+        source=source,
+        raw_input=raw_input,
+    )
+
+    async def ws_hook(event: dict):
+        pass
+
+    engine.on_event(ws_hook)
+
+    try:
+        result = await engine.run()
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    return result
+
+
 @router.post("/api/v1/users/setup-demo-admin")
 async def setup_demo_admin(
     ctx: OrgContext = Depends(get_org_context),
@@ -236,45 +275,6 @@ async def login(body: LoginRequest):
                 "org_id": str(row["org_id"])
             }
         }
-
-
-    file_bytes = await file.read() if file else None
-    if not file_bytes and not (po_text or "").strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Send either po_text as a form field or upload a file.",
-        )
-
-    raw_input = {
-        "raw_text":       po_text or "",
-        "buyer_whatsapp": buyer_whatsapp,
-        "buyer_email":    buyer_email,
-    }
-    if file_bytes:
-        raw_input["file_bytes"] = file_bytes
-        raw_input["mime_type"]  = file.content_type if file else "application/pdf"
-
-    source = "file" if file_bytes else "whatsapp" if buyer_whatsapp else "portal"
-
-    engine, wf_ctx = build_po_to_dispatch_workflow(
-        org_id=str(ctx.org_id),
-        source=source,
-        raw_input=raw_input,
-    )
-
-    async def ws_hook(event: dict):
-        pass
-
-    engine.on_event(ws_hook)
-
-    try:
-        result = await engine.run()
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
-    return result
 
 
 # ── WHATSAPP WEBHOOK INTERFACES ───────────────
