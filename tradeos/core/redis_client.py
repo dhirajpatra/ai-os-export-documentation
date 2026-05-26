@@ -83,3 +83,24 @@ async def redis_ping() -> bool:
         return await get_redis().ping()
     except Exception:
         return False
+
+
+# ── Caching helpers ───────────────────────────────────────────────────────────
+import json
+
+async def cache_get(key: str) -> dict | None:
+    try:
+        r = get_redis()
+        data = await r.get(key)
+        if data:
+            return json.loads(data)
+    except Exception as exc:
+        print(f"[Redis] cache_get error: {exc}")
+    return None
+
+async def cache_set(key: str, value: dict, ttl_seconds: int = 300) -> None:
+    try:
+        r = get_redis()
+        await r.setex(key, ttl_seconds, json.dumps(value))
+    except Exception as exc:
+        print(f"[Redis] cache_set error: {exc}")

@@ -136,13 +136,13 @@ async def full_document_pipeline(file_bytes: bytes, mime_type: str) -> dict:
     Note: LLM-based field extraction is NOT done here.
           It is the responsibility of POExtractionAgent.
     """
-    from core.redis_client import cache_get, cache_set, generate_cache_key
+    from core.redis_client import cache_get, cache_set
     import hashlib
     
     # 1. Check Cache
     file_hash = hashlib.sha256(file_bytes).hexdigest()
     cache_key = f"ocr:{file_hash}"
-    cached_result = cache_get(cache_key)
+    cached_result = await cache_get(cache_key)
     if cached_result:
         print(f"[OCR] ⚡ Cache hit for file: {cache_key}")
         return cached_result
@@ -158,6 +158,6 @@ async def full_document_pipeline(file_bytes: bytes, mime_type: str) -> dict:
     }
     
     # 2. Set Cache
-    cache_set(cache_key, result, ttl_seconds=300)
+    await cache_set(cache_key, result, ttl_seconds=300)
     
     return result
