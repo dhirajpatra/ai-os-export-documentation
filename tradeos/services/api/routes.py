@@ -626,11 +626,12 @@ async def get_approval_detail(
         # ── Step 5: format items list into readable strings ───────────────
         ci_data = extracted_data.get("commercial_invoice", {})
         if ci_data:
-            buyer_name = ci_data.get("importer", {}).get("name", "N/A")
+            importer = ci_data.get("importer") or {}
+            buyer_name = importer.get("name", "N/A")
             destination = ci_data.get("port_of_discharge", "N/A")
             payment_terms = ci_data.get("payment_terms", "N/A")
             incoterms = ci_data.get("incoterms", "N/A")
-            items = ci_data.get("items", [])
+            items = ci_data.get("items") or []
         else:
             buyer_name = extracted_data.get("buyer_name", "N/A")
             destination = extracted_data.get("destination_port", "N/A")
