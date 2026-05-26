@@ -69,6 +69,7 @@ async def extract_text_paddle(file_bytes: bytes, mime_type: str) -> str:
         payload = {
             "file_b64":  base64.b64encode(file_bytes).decode(),
             "mime_type": mime_type or "application/pdf",
+            "api_key":   os.getenv("OCR_API_KEY", ""),   
         }
         async with httpx.AsyncClient(timeout=OCR_TIMEOUT_S) as client:
             resp = await client.post(OCR_SERVICE_URL, json=payload)
