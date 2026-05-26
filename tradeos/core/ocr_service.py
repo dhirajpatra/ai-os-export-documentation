@@ -110,8 +110,9 @@ async def extract_text(file_bytes: bytes, mime_type: str) -> str:
     # 1 — pypdf (text-layer PDF)
     if mime_type in ("application/pdf", "pdf", "", None):
         text = await extract_text_pypdf(file_bytes)
-        if text:
+        if text and len(text.strip()) > 50:
             return text
+        print(f"[OCR] pypdf extracted only {len(text) if text else 0} chars. Falling back to PaddleOCR.")
 
     # 2 — PaddleOCR sidecar
     text = await extract_text_paddle(file_bytes, mime_type)

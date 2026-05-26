@@ -636,7 +636,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 # anything else unknown      → 'manual'
                 {"file": "whatsapp", "whatsapp": "whatsapp",
                  "email": "email", "portal": "portal"}.get(ctx.source, "manual"),
-                extracted.get("raw_text") or None,
+                ctx.raw_input.get("raw_text") or None,
                 db_workflow_id,
             )
             ctx.order_id = str(order_row["id"])
