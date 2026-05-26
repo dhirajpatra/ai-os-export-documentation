@@ -69,6 +69,7 @@ async def extract_text_paddle(file_bytes: bytes, mime_type: str) -> str:
         payload = {
             "file_b64":  base64.b64encode(file_bytes).decode(),
             "mime_type": mime_type or "application/pdf",
+            "api_key":   os.getenv("OCR_API_KEY", ""),   
         }
         async with httpx.AsyncClient(timeout=OCR_TIMEOUT_S) as client:
             resp = await client.post(OCR_SERVICE_URL, json=payload)
@@ -109,8 +110,9 @@ async def extract_text(file_bytes: bytes, mime_type: str) -> str:
     # 1 — pypdf (text-layer PDF)
     if mime_type in ("application/pdf", "pdf", "", None):
         text = await extract_text_pypdf(file_bytes)
-        if text:
+        if text and len(text.strip()) > 50:
             return text
+        print(f"[OCR] pypdf extracted only {len(text) if text else 0} chars. Falling back to PaddleOCR.")
 
     # 2 — PaddleOCR sidecar
     text = await extract_text_paddle(file_bytes, mime_type)
@@ -135,13 +137,13 @@ async def full_document_pipeline(file_bytes: bytes, mime_type: str) -> dict:
     Note: LLM-based field extraction is NOT done here.
           It is the responsibility of POExtractionAgent.
     """
-    from core.redis_client import cache_get, cache_set, generate_cache_key
+    from core.redis_client import cache_get, cache_set
     import hashlib
     
     # 1. Check Cache
     file_hash = hashlib.sha256(file_bytes).hexdigest()
     cache_key = f"ocr:{file_hash}"
-    cached_result = cache_get(cache_key)
+    cached_result = await cache_get(cache_key)
     if cached_result:
         print(f"[OCR] ⚡ Cache hit for file: {cache_key}")
         return cached_result
@@ -157,6 +159,6 @@ async def full_document_pipeline(file_bytes: bytes, mime_type: str) -> dict:
     }
     
     # 2. Set Cache
-    cache_set(cache_key, result, ttl_seconds=300)
+    await cache_set(cache_key, result, ttl_seconds=300)
     
     return result

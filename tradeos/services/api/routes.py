@@ -57,6 +57,11 @@ class ApprovalAction(BaseModel):
     field_overrides: dict = Field(default_factory=dict)
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 class WhatsAppWebhookPayload(BaseModel):
     object: str
     entry: list[dict]
@@ -154,6 +159,122 @@ async def run_killer_demo(
             detail=str(exc),
         ) from exc
     return result
+
+
+@router.post("/api/v1/users/setup-demo-admin")
+async def setup_demo_admin(
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """
+    Creates or updates the demo user. 
+    Uses direct SQL to hash the password with pgcrypto and sets is_active = FALSE.
+    
+    Direct SQL equivalent:
+    UPDATE users 
+    SET password_hash = crypt('Ch@ngeMe123', gen_salt('bf')),
+        is_active = FALSE
+    WHERE email = 'demo@exportagent.online';
+    """
+    from core.db import get_pool
+    pool = get_pool()
+    
+    async with pool.acquire() as db:
+        # We ensure the pgcrypto extension is available
+        await db.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
+        
+        await db.execute(
+            """
+            INSERT INTO users (org_id, email, name, role, password_hash, is_active)
+            VALUES (
+                $1, 
+                'demo@exportagent.online', 
+                'Demo User', 
+                'admin', 
+                crypt('Ch@ngeMe123', gen_salt('bf')), 
+                FALSE
+            )
+            ON CONFLICT (org_id, email) DO UPDATE
+            SET password_hash = crypt('Ch@ngeMe123', gen_salt('bf')),
+                is_active = FALSE;
+            """,
+            ctx.org_id
+        )
+        
+    return {
+        "status": "success",
+        "email": "demo@exportagent.online",
+        "is_active": False,
+        "message": "User demo@exportagent.online provisioned successfully."
+    }
+
+# ── AUTHENTICATION ────────────────────────────
+
+@router.post("/api/v1/auth/login")
+async def login(body: LoginRequest):
+    """
+    Authenticate a user using pgcrypto for password verification and return a JWT.
+    """
+    from core.db import get_pool
+    from core.rbac import create_access_token, TokenPayload
+    import time
+    from core.config import cfg
+    
+    pool = get_pool()
+    async with pool.acquire() as db:
+        # Check credentials using pgcrypto's crypt() function
+        row = await db.fetchrow(
+            """
+            SELECT id, org_id, role, email, name, is_active
+            FROM users
+            WHERE email = $1
+              AND password_hash = crypt($2, password_hash)
+            """,
+            body.email,
+            body.password
+        )
+        
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+            
+        if not row["is_active"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is inactive. Please contact support.",
+            )
+            
+        # Update last login timestamp
+        await db.execute(
+            "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+            row["id"]
+        )
+        
+        # Generate JWT token
+        payload = TokenPayload(
+            sub=str(row["id"]),
+            org_id=str(row["org_id"]),
+            role=row["role"],
+            email=row["email"],
+            exp=int(time.time()) + 86400  # 24 hours expiry
+        )
+        
+        # Ensure we have a default secret if not explicitly configured
+        secret = getattr(cfg, "JWT_SECRET", "super-secret-key-change-in-prod")
+        token = create_access_token(payload, secret)
+        
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(row["id"]),
+                "name": row["name"],
+                "email": row["email"],
+                "role": row["role"],
+                "org_id": str(row["org_id"])
+            }
+        }
 
 
 # ── WHATSAPP WEBHOOK INTERFACES ───────────────
@@ -505,11 +626,12 @@ async def get_approval_detail(
         # ── Step 5: format items list into readable strings ───────────────
         ci_data = extracted_data.get("commercial_invoice", {})
         if ci_data:
-            buyer_name = ci_data.get("importer", {}).get("name", "N/A")
+            importer = ci_data.get("importer") or {}
+            buyer_name = importer.get("name", "N/A")
             destination = ci_data.get("port_of_discharge", "N/A")
             payment_terms = ci_data.get("payment_terms", "N/A")
             incoterms = ci_data.get("incoterms", "N/A")
-            items = ci_data.get("items", [])
+            items = ci_data.get("items") or []
         else:
             buyer_name = extracted_data.get("buyer_name", "N/A")
             destination = extracted_data.get("destination_port", "N/A")
@@ -1208,3 +1330,43 @@ async def stream_kafka_events():
     async def event_generator():
         yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+"""
+Paste this into services/api/routes.py — one new endpoint.
+
+Add this import near the top of routes.py:
+    from services.agents.template_matcher import list_templates
+"""
+
+@router.get("/api/v1/templates")
+async def get_learned_templates(
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """
+    Returns all buyer templates learned by the PO extraction agent.
+    Powers the "Learned Buyers" panel in the React frontend.
+
+    Response shape:
+    [
+      {
+        "buyer_name":               "Al Rashid Trading Co.",
+        "buyer_country":            "AE",
+        "currency":                 "USD",
+        "payment_terms":            "LC",
+        "incoterms":                "CIF",
+        "destination_port":         "Jebel Ali",
+        "use_count":                47,
+        "avg_confidence":           92.4,
+        "template_hit_count":       41,
+        "llm_fallback_count":       6,
+        "last_extraction_confidence": 94.1,
+        "hit_rate_pct":             87.2,
+        "last_used_at":             "2026-05-20T10:42:00Z",
+        "created_at":               "2026-03-01T08:00:00Z"
+      },
+      ...
+    ]
+    """
+    from services.agents.template_matcher import list_templates
+    templates = await list_templates(str(ctx.org_id))
+    return {"templates": templates, "count": len(templates)}

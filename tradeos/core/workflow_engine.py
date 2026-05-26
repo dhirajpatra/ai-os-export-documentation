@@ -476,6 +476,16 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 "declaration":    "Draft — pending review.",
                 "_confidence":    _cfg.CONFIDENCE_THRESHOLD_AUTO,
                 "_draft":         True,
+                "importer":       {"name": ctx.extracted_po.get("buyer_name", "N/A")},
+                "port_of_discharge": ctx.extracted_po.get("destination_port", "N/A"),
+                "items":          [
+                    {
+                        "description": item.get("description", "N/A"),
+                        "qty": item.get("quantity", item.get("qty", 0)),
+                        "unit": item.get("unit", "")
+                    }
+                    for item in ctx.extracted_po.get("items", [])
+                ],
             }
 
         try:
@@ -626,7 +636,7 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 # anything else unknown      → 'manual'
                 {"file": "whatsapp", "whatsapp": "whatsapp",
                  "email": "email", "portal": "portal"}.get(ctx.source, "manual"),
-                extracted.get("raw_text") or None,
+                ctx.raw_input.get("raw_text") or None,
                 db_workflow_id,
             )
             ctx.order_id = str(order_row["id"])
