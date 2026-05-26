@@ -1329,3 +1329,43 @@ async def stream_kafka_events():
     async def event_generator():
         yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+"""
+Paste this into services/api/routes.py — one new endpoint.
+
+Add this import near the top of routes.py:
+    from services.agents.template_matcher import list_templates
+"""
+
+@router.get("/api/v1/templates")
+async def get_learned_templates(
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """
+    Returns all buyer templates learned by the PO extraction agent.
+    Powers the "Learned Buyers" panel in the React frontend.
+
+    Response shape:
+    [
+      {
+        "buyer_name":               "Al Rashid Trading Co.",
+        "buyer_country":            "AE",
+        "currency":                 "USD",
+        "payment_terms":            "LC",
+        "incoterms":                "CIF",
+        "destination_port":         "Jebel Ali",
+        "use_count":                47,
+        "avg_confidence":           92.4,
+        "template_hit_count":       41,
+        "llm_fallback_count":       6,
+        "last_extraction_confidence": 94.1,
+        "hit_rate_pct":             87.2,
+        "last_used_at":             "2026-05-20T10:42:00Z",
+        "created_at":               "2026-03-01T08:00:00Z"
+      },
+      ...
+    ]
+    """
+    from services.agents.template_matcher import list_templates
+    templates = await list_templates(str(ctx.org_id))
+    return {"templates": templates, "count": len(templates)}

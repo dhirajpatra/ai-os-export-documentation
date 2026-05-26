@@ -378,6 +378,30 @@ Thresholds configurable per org in settings.
 - **Conversational ERP Replacement** — natural language is the interface
 - **AI-Managed Business Execution Layer** — AI briefs humans, not the other way around
 
+"""
+Shipment 1 — Al Rashid Trading (new buyer)
+  Layer 1: rule-based → confidence 65 → not enough
+  Layer 2: no template yet → miss
+  Layer 3: LLM fires → extracts all fields, confidence 91
+  learn() → INSERT into po_templates, write Redis
+  Cost: LLM call
+
+Shipment 2 — Al Rashid Trading
+  Layer 2: Redis hit → template fills payment_terms + incoterms + port
+  rule-based + template → confidence 88 → sufficient
+  _increment_counter(hit=True) → template_hit_count++
+  Cost: ₹0
+
+Shipment 10 — Al Rashid Trading
+  avg_confidence = 91.4, hit_rate = 89%
+  Layer 2 always fires cleanly
+  Cost: ₹0
+
+Dashboard shows:
+  Al Rashid Trading · 10 shipments · 91% confidence · 89% hit rate
+  
+"""
+
 ---
 
 ## Tech Stack
