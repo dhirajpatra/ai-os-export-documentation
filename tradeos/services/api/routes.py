@@ -62,6 +62,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    org_name: str = Field(..., min_length=2)
+    name: str = Field(..., min_length=2)
+    email: str = Field(..., pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")
+    password: str = Field(..., min_length=6)
+
+
 class WhatsAppWebhookPayload(BaseModel):
     object: str
     entry: list[dict]
@@ -209,15 +216,115 @@ async def setup_demo_admin(
 
 # ── AUTHENTICATION ────────────────────────────
 
+@router.post("/api/v1/auth/register")
+async def register(body: RegisterRequest):
+    """
+    Onboard a new organization and create its primary owner user account.
+    Initiates an active session immediately.
+    """
+    import re
+    import secrets
+    from core.db import get_pool
+    
+    pool = get_pool()
+    async with pool.acquire() as db:
+        # Check if email is already taken
+        existing_user = await db.fetchval(
+            "SELECT id FROM users WHERE email = $1",
+            body.email
+        )
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email address is already registered.",
+            )
+            
+        # Create a unique organization slug
+        org_slug = body.org_name.lower().strip()
+        org_slug = re.sub(r'[^a-z0-9\s-]', '', org_slug)
+        org_slug = re.sub(r'[\s-]+', '-', org_slug)
+        if not org_slug:
+            org_slug = "organization"
+            
+        base_slug = org_slug
+        suffix = 1
+        while True:
+            exists = await db.fetchval("SELECT id FROM organizations WHERE slug = $1", org_slug)
+            if not exists:
+                break
+            org_slug = f"{base_slug}-{suffix}"
+            suffix += 1
+            
+        # Create organization and user within a single transaction
+        async with db.transaction():
+            # Insert organization
+            org_id = await db.fetchval(
+                """
+                INSERT INTO organizations (name, slug)
+                VALUES ($1, $2)
+                RETURNING id;
+                """,
+                body.org_name,
+                org_slug
+            )
+            
+            # Insert owner user
+            user_id = await db.fetchval(
+                """
+                INSERT INTO users (org_id, email, name, role, password_hash, auth_provider)
+                VALUES ($1, $2, $3, 'owner', crypt($4, gen_salt('bf')), 'email')
+                RETURNING id;
+                """,
+                org_id,
+                body.email,
+                body.name,
+                body.password
+            )
+            
+            # Generate cryptographically secure session token
+            session_token = secrets.token_hex(32)
+            
+            # Insert into user_sessions
+            from datetime import datetime, timedelta
+            expires_at = datetime.utcnow() + timedelta(days=1)
+            
+            await db.execute(
+                """
+                INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+                VALUES ($1, $2, $3, $4);
+                """,
+                user_id,
+                org_id,
+                session_token,
+                expires_at
+            )
+            
+        return {
+            "access_token": session_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user_id),
+                "name": body.name,
+                "email": body.email,
+                "role": "owner",
+                "org_id": str(org_id)
+            },
+            "organization": {
+                "id": str(org_id),
+                "name": body.org_name,
+                "slug": org_slug
+            }
+        }
+
+
 @router.post("/api/v1/auth/login")
 async def login(body: LoginRequest):
     """
-    Authenticate a user using pgcrypto for password verification and return a JWT.
+    Authenticate a user, generate a secure session token, and persist it in user_sessions.
     """
+    import secrets
     from core.db import get_pool
-    from core.rbac import create_access_token, TokenPayload
-    import time
-    from core.config import cfg
+    from datetime import datetime, timedelta
     
     pool = get_pool()
     async with pool.acquire() as db:
@@ -251,21 +358,24 @@ async def login(body: LoginRequest):
             row["id"]
         )
         
-        # Generate JWT token
-        payload = TokenPayload(
-            sub=str(row["id"]),
-            org_id=str(row["org_id"]),
-            role=row["role"],
-            email=row["email"],
-            exp=int(time.time()) + 86400  # 24 hours expiry
+        # Generate secure random session token
+        session_token = secrets.token_hex(32)
+        expires_at = datetime.utcnow() + timedelta(days=1)
+        
+        # Save session in database
+        await db.execute(
+            """
+            INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+            VALUES ($1, $2, $3, $4);
+            """,
+            row["id"],
+            row["org_id"],
+            session_token,
+            expires_at
         )
         
-        # Ensure we have a default secret if not explicitly configured
-        secret = getattr(cfg, "JWT_SECRET", "super-secret-key-change-in-prod")
-        token = create_access_token(payload, secret)
-        
         return {
-            "access_token": token,
+            "access_token": session_token,
             "token_type": "bearer",
             "user": {
                 "id": str(row["id"]),
@@ -275,6 +385,36 @@ async def login(body: LoginRequest):
                 "org_id": str(row["org_id"])
             }
         }
+
+
+@router.post("/api/v1/auth/logout")
+async def logout(request: Request):
+    """
+    Invalidate the active user session.
+    """
+    from core.db import get_pool
+    
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing or invalid Authorization header",
+        )
+        
+    token = auth_header.split(" ")[1]
+    
+    pool = get_pool()
+    async with pool.acquire() as db:
+        await db.execute(
+            """
+            UPDATE user_sessions
+            SET is_active = FALSE, updated_at = NOW()
+            WHERE token = $1;
+            """,
+            token
+        )
+        
+    return {"status": "success", "message": "Logged out successfully."}
 
 
 # ── WHATSAPP WEBHOOK INTERFACES ───────────────
