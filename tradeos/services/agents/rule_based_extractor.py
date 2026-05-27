@@ -216,10 +216,8 @@ _DATE = re.compile(
 
 # Buyer name from message headers
 _BUYER = re.compile(
-    r"(?:from|buyer|consignee|importer|ordered\s*by|client|company|party|"
-    r"ship\s*to|sold\s*to|bill\s*to)[\s:—\-]+"
-    r"(?P<name>[A-Z][A-Za-z\s&.,()-]{3,60}?)(?=\n|,|\.|$)",
-    _RE_FLAGS,
+    r"(?:[Ff][Rr][Oo][Mm]|[Bb][Uu][Yy][Ee][Rr]|[Cc][Oo][Nn][Ss][Ii][Gg][Nn][Ee][Ee]|[Ii][Mm][Pp][Oo][Rr][Tt][Ee][Rr]|[Oo][Rr][Dd][Ee][Rr][Ee][Dd]\s*[Bb][Yy]|[Cc][Ll][Ii][Ee][Nn][Tt]|[Cc][Oo][Mm][Pp][Aa][Nn][Yy]|[Pp][Aa][Rr][Tt][Yy]|[Ss][Hh][Ii][Pp]\s*[Tt][Oo]|[Ss][Oo][Ll][Dd]\s*[Tt][Oo]|[Bb][Ii][Ll][Ll]\s*[Tt][Oo])(?:\s*\([^)]*\))?[\s:—\-]+"
+    r"(?P<name>[A-Z][A-Za-z\s&.,()-]{3,60}?)(?=\n|,|\.|$)"
 )
 
 # Destination port in free text
@@ -518,13 +516,17 @@ class RuleBasedExtractor:
 
     @classmethod
     def _extract_buyer_country(cls, text: str, dest_port: Optional[str]) -> Optional[str]:
-        # Direct country mention
+        # 1. Infer from destination port (very high precision, using membership check)
+        if dest_port:
+            dp_lower = dest_port.lower()
+            for p, country in PORT_COUNTRY.items():
+                if p in dp_lower:
+                    return country
+
+        # 2. Check for country mentioned in the text as a fallback
         m = _COUNTRY.search(text)
         if m:
             return _COUNTRY_ISO.get(m.group("country").lower())
-        # Infer from destination port
-        if dest_port:
-            return PORT_COUNTRY.get(dest_port.lower())
         return None
 
     # ── Helpers ─────────────────────────────────────────────────────────────
