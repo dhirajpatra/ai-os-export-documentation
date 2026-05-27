@@ -34,8 +34,7 @@ import uuid
 from services.agents.base import BaseAgent
 from services.agents.rule_based_extractor import RuleBasedExtractor
 from services.agents.template_matcher import TemplateMatcher
-from services.api.main import parse_llm_json
-from core.config import cfg
+from core.config import cfg, parse_llm_json
 
 
 class POExtractionAgent(BaseAgent):
