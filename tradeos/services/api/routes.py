@@ -417,6 +417,183 @@ async def logout(request: Request):
     return {"status": "success", "message": "Logged out successfully."}
 
 
+@router.get("/api/v1/auth/google/login")
+async def google_login():
+    """
+    Redirect the user to Google's OAuth 2.0 authorization page.
+    """
+    import urllib.parse
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id")
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://exportagent.online/api/v1/auth/google/callback")
+    
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account"
+    }
+    
+    url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url)
+
+
+@router.get("/api/v1/auth/google/callback")
+async def google_callback(code: str):
+    """
+    Handle the OAuth 2.0 callback, exchange code for user profile,
+    and initiate a secure multi-tenant session.
+    """
+    import secrets
+    import httpx
+    import re
+    from core.db import get_pool
+    from datetime import datetime, timedelta
+    from fastapi.responses import RedirectResponse
+    
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "your-google-client-secret")
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://exportagent.online/api/v1/auth/google/callback")
+    
+    # 1. Exchange the code for the tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(token_url, data=data)
+        if token_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Google token exchange failed: {token_resp.text}"
+            )
+        tokens = token_resp.json()
+        id_token = tokens.get("id_token")
+        
+        # 2. Verify the ID token and get the user's profile
+        info_resp = await client.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}")
+        if info_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to verify Google ID token"
+            )
+        profile = info_resp.json()
+        
+    google_sub = profile.get("sub")
+    email = profile.get("email")
+    name = profile.get("name", email.split("@")[0])
+    
+    if not google_sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing unique identifiers in Google profile"
+        )
+        
+    pool = get_pool()
+    async with pool.acquire() as db:
+        # Check if user already exists (linked by google_sub or email)
+        row = await db.fetchrow(
+            """
+            SELECT id, org_id, role, is_active
+            FROM users
+            WHERE google_sub = $1 OR email = $2;
+            """,
+            google_sub,
+            email
+        )
+        
+        if row:
+            if not row["is_active"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account is inactive. Please contact support."
+                )
+            
+            user_id = row["id"]
+            org_id = row["org_id"]
+            
+            # Ensure google_sub and auth_provider are stored/updated
+            await db.execute(
+                """
+                UPDATE users
+                SET google_sub = COALESCE(google_sub, $1),
+                    auth_provider = 'google',
+                    last_login_at = NOW()
+                WHERE id = $2;
+                """,
+                google_sub,
+                user_id
+            )
+        else:
+            # User does not exist, onboard them as a new tenant
+            org_name = f"{name}'s Organization"
+            org_slug = org_name.lower().strip()
+            org_slug = re.sub(r'[^a-z0-9\s-]', '', org_slug)
+            org_slug = re.sub(r'[\s-]+', '-', org_slug)
+            if not org_slug:
+                org_slug = "organization"
+                
+            base_slug = org_slug
+            suffix = 1
+            while True:
+                exists = await db.fetchval("SELECT id FROM organizations WHERE slug = $1", org_slug)
+                if not exists:
+                    break
+                org_slug = f"{base_slug}-{suffix}"
+                suffix += 1
+                
+            async with db.transaction():
+                org_id = await db.fetchval(
+                    """
+                    INSERT INTO organizations (name, slug)
+                    VALUES ($1, $2)
+                    RETURNING id;
+                    """,
+                    org_name,
+                    org_slug
+                )
+                
+                user_id = await db.fetchval(
+                    """
+                    INSERT INTO users (org_id, email, name, role, auth_provider, google_sub)
+                    VALUES ($1, $2, $3, 'owner', 'google', $4)
+                    RETURNING id;
+                    """,
+                    org_id,
+                    email,
+                    name,
+                    google_sub
+                )
+                
+        # Create active user session
+        session_token = secrets.token_hex(32)
+        expires_at = datetime.utcnow() + timedelta(days=1)
+        
+        await db.execute(
+            """
+            INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+            VALUES ($1, $2, $3, $4);
+            """,
+            user_id,
+            org_id,
+            session_token,
+            expires_at
+        )
+        
+    # Redirect user back to the frontend dashboard with their active session token in the URL query string
+    frontend_url = os.getenv("FRONTEND_URL", "https://exportagent.online")
+    return RedirectResponse(
+        url=f"{frontend_url.rstrip('/')}/dashboard?token={session_token}"
+    )
+
+
 # ── WHATSAPP WEBHOOK INTERFACES ───────────────
 
 @router.get("/api/v1/webhooks/whatsapp")
