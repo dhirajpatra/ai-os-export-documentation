@@ -106,6 +106,10 @@ class WorkflowContext:
     source:         str   = ""        # whatsapp | email | portal | file
     raw_input:      dict  = field(default_factory=dict)
 
+    # Original raw PO text — kept here so resume_from_approval()
+    # can pass it to TemplateMatcher.learn() after human corrections
+    original_raw_text: str = ""
+
     # Accumulated outputs from steps
     extracted_po:   dict  = field(default_factory=dict)
     hs_validations: dict  = field(default_factory=dict)
@@ -272,6 +276,14 @@ class WorkflowEngine:
             self.status = WorkflowStatus.CANCELLED
             return self._snapshot("cancelled")
 
+        # ── Learn from human corrections before continuing ────────────────
+        # If the human changed any fields, we:
+        #   1. Save each changed field to hitl_corrections (audit trail)
+        #   2. Re-learn the buyer template with the corrected data
+        #      so the same corrections don't need to happen next shipment
+        if overrides:
+            await self._save_corrections_and_learn(overrides)
+
         if approval_action == "request_changes" and overrides:
             # Apply overrides to context and re-run document generation
             self.ctx.raw_input.update(overrides)
@@ -279,6 +291,68 @@ class WorkflowEngine:
         self.status = WorkflowStatus.RUNNING
         # Continue from where we paused
         return await self.run()
+
+    async def _save_corrections_and_learn(self, overrides: dict) -> None:
+        """
+        Persist field-level corrections and update the buyer template.
+        Called only when a human makes changes during HITL review.
+        Non-fatal: any DB or template error is caught and logged.
+        """
+        import json as _json
+        import uuid as _uuid
+        from services.agents.template_matcher import TemplateMatcher, buyer_key_from_name
+
+        corrected_po   = {**self.ctx.extracted_po, **overrides}
+        buyer_name     = corrected_po.get("buyer_name") or ""
+        bk             = buyer_key_from_name(buyer_name) if buyer_name else None
+        original_text  = self.ctx.original_raw_text
+
+        # 1 — Save each changed field to hitl_corrections
+        try:
+            from core.db import get_pool
+            pool = get_pool()
+            async with pool.acquire() as db:
+                for field_name, new_value in overrides.items():
+                    old_value = self.ctx.extracted_po.get(field_name)
+                    # Only store if value actually changed
+                    if str(old_value or "") == str(new_value or ""):
+                        continue
+                    await db.execute(
+                        """
+                        INSERT INTO hitl_corrections (
+                            org_id, workflow_id, order_id,
+                            buyer_key, field_name,
+                            wrong_value, correct_value,
+                            correction_source
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        """,
+                        _uuid.UUID(self.ctx.org_id),
+                        _uuid.UUID(self.ctx.workflow_id),
+                        _uuid.UUID(self.ctx.order_id) if self.ctx.order_id else None,
+                        bk,
+                        field_name,
+                        str(old_value) if old_value is not None else None,
+                        str(new_value),
+                        "hitl_approval",
+                    )
+                print(f"[HITL learn] saved {len(overrides)} correction(s) for buyer '{buyer_name}'")
+        except Exception as exc:
+            print(f"[HITL learn] correction save failed (non-fatal): {exc}")
+
+        # 2 — Re-learn buyer template with corrected data
+        # llm_used=False because the human did the correction, not the LLM
+        if buyer_name and original_text:
+            try:
+                await TemplateMatcher.learn(
+                    raw_text   = original_text,
+                    extracted  = corrected_po,
+                    org_id     = self.ctx.org_id,
+                    buyer_name = buyer_name,
+                    llm_used   = False,
+                )
+                print(f"[HITL learn] template updated for '{buyer_name}' from human corrections")
+            except Exception as exc:
+                print(f"[HITL learn] template update failed (non-fatal): {exc}")
 
     def _snapshot(self, status: str) -> dict:
         return {
@@ -319,6 +393,25 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
 
         agent    = POExtractionAgent(org_id=_uuid.UUID(ctx.org_id))
         raw_text = ctx.raw_input.get("raw_text", "")
+
+        # Load per-org extraction rules once per workflow
+        # These are passed down to RuleBasedExtractor so each org
+        # gets their own commodity→HS mappings and default fields
+        org_rules: dict = {}
+        try:
+            from core.db import get_pool
+            _pool = get_pool()
+            async with _pool.acquire() as _db:
+                row = await _db.fetchrow(
+                    "SELECT extraction_rules FROM organizations WHERE id = $1",
+                    _uuid.UUID(ctx.org_id),
+                )
+                if row and row["extraction_rules"]:
+                    org_rules = dict(row["extraction_rules"])
+        except Exception as _exc:
+            print(f"[step_extract_po] org_rules load failed (non-fatal): {_exc}")
+
+        ctx.raw_input["_org_rules"] = org_rules
         doc_preextracted: dict = {}
 
         if ctx.raw_input.get("file_bytes"):
@@ -341,6 +434,8 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
                 extracted[field_name] = value
 
         ctx.extracted_po = extracted
+        # Keep original raw text so HITL corrections can re-learn the template
+        ctx.original_raw_text = raw_text
         confidence = float(extracted.get("confidence") or 0)
         ctx.overall_confidence = confidence
 

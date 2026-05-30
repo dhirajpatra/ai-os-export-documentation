@@ -1077,6 +1077,75 @@ async def action_approval(
             row["workflow_id"],
         )
 
+        # ── Trigger learning from human corrections ───────────────────────
+        # If the reviewer changed any fields (field_overrides is not empty),
+        # call resume_from_approval so corrections get saved to hitl_corrections
+        # and the buyer template gets updated — this is what makes the system
+        # improve per org over time.
+        # We do this for both approve and request_changes actions.
+        if body.field_overrides and body.action in ("approve", "request_changes"):
+            try:
+                from core.workflow_engine import get_engine
+                engine = get_engine(workflow_id)
+                if engine:
+                    # Engine still alive in memory (same Railway instance)
+                    await engine._save_corrections_and_learn(body.field_overrides)
+                    print(f"[Approval] template learning triggered for workflow {workflow_id}")
+                else:
+                    # Engine is gone (different instance or restarted)
+                    # Fall back to direct TemplateMatcher.learn() using DB data
+                    order_data = await db.fetchrow(
+                        "SELECT po_raw_text, extracted_data FROM orders WHERE id = $1",
+                        row["order_id"],
+                    )
+                    if order_data and order_data["po_raw_text"]:
+                        from services.agents.template_matcher import TemplateMatcher
+                        import json as _json
+                        existing = {}
+                        if order_data["extracted_data"]:
+                            raw = order_data["extracted_data"]
+                            existing = _json.loads(raw) if isinstance(raw, str) else raw
+                        corrected = {**existing, **body.field_overrides}
+                        buyer_name = corrected.get("buyer_name", "")
+                        if buyer_name:
+                            await TemplateMatcher.learn(
+                                raw_text   = order_data["po_raw_text"],
+                                extracted  = corrected,
+                                org_id     = str(ctx.org_id),
+                                buyer_name = buyer_name,
+                                llm_used   = False,
+                            )
+                            print(f"[Approval] fallback template learning done for '{buyer_name}'")
+
+                # Save corrections to hitl_corrections table directly as well
+                # (engine._save_corrections_and_learn does this too, but only
+                #  if engine is alive — this ensures the audit trail is always written)
+                from services.agents.template_matcher import buyer_key_from_name
+                buyer_name_for_key = body.field_overrides.get("buyer_name", "") or ""
+                bk = buyer_key_from_name(buyer_name_for_key) if buyer_name_for_key else None
+                for field_name, new_value in body.field_overrides.items():
+                    await db.execute(
+                        """
+                        INSERT INTO hitl_corrections (
+                            org_id, workflow_id, order_id,
+                            buyer_key, field_name,
+                            correct_value, correction_source, corrected_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        ctx.org_id,
+                        row["workflow_id"],
+                        row["order_id"],
+                        bk,
+                        field_name,
+                        str(new_value),
+                        "hitl_approval",
+                        ctx.user_id,
+                    )
+            except Exception as learn_exc:
+                # Never block the approval response — learning is best-effort
+                print(f"[Approval] template learning error (non-fatal): {learn_exc}")
+
         if body.action == "approve" and row["order_id"]:
             # Update order status
             await db.execute(

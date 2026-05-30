@@ -54,6 +54,8 @@ Do not hallucinate values.
         source   = input_data["source"]
         raw_text = input_data.get("raw_text", "")
         org_id   = str(self.org_id)
+        # Per-org extraction rules loaded in step_extract_po and passed through
+        org_rules = input_data.get("_org_rules", {})
 
         # Skip early exits for formal PDFs, long text, or multi-item documents
         is_file = (source == "file" or bool(input_data.get("file_bytes")))
@@ -62,7 +64,7 @@ Do not hallucinate values.
         force_llm = is_file or is_long_text or is_multi
 
         # ── LAYER 1: Rule-based extraction ───────────────────────────────
-        rule_result = RuleBasedExtractor.extract(raw_text)
+        rule_result = RuleBasedExtractor.extract(raw_text, org_overrides=org_rules)
         print(
             f"[POExtraction] Layer1/rule-based confidence={rule_result['confidence']:.1f} "
             f"threshold={cfg.CONFIDENCE_THRESHOLD_AUTO} force_llm={force_llm}"
