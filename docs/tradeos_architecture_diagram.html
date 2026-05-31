@@ -1,0 +1,133 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); background: transparent; }
+.mmd { width: 100%; overflow-x: auto; }
+</style>
+<h2 class="sr-only">TradeOS full system architecture diagram showing all layers from ingestion to infrastructure</h2>
+<div class="mmd" id="diagram"></div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '13px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    primaryColor: dark ? '#2a2850' : '#EEEDFE',
+    primaryTextColor: dark ? '#CECBF6' : '#26215C',
+    primaryBorderColor: dark ? '#534AB7' : '#534AB7',
+    secondaryColor: dark ? '#0a3028' : '#E1F5EE',
+    secondaryTextColor: dark ? '#9FE1CB' : '#085041',
+    secondaryBorderColor: dark ? '#1D9E75' : '#1D9E75',
+    tertiaryColor: dark ? '#2d1e0a' : '#FAEEDA',
+    tertiaryTextColor: dark ? '#FAC775' : '#412402',
+    tertiaryBorderColor: dark ? '#BA7517' : '#BA7517',
+    noteBkgColor: dark ? '#1a1a18' : '#F1EFE8',
+    noteTextColor: dark ? '#D3D1C7' : '#2C2C2A',
+    noteBorderColor: dark ? '#5F5E5A' : '#888780',
+    lineColor: dark ? '#7F77DD' : '#534AB7',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+    clusterBkg: dark ? '#111' : '#fafafa',
+    clusterBorder: dark ? '#333' : '#ddd',
+    edgeLabelBackground: dark ? '#1a1a18' : '#F1EFE8',
+  },
+  flowchart: { curve: 'basis', padding: 20, nodeSpacing: 40, rankSpacing: 56 }
+});
+
+const graph = `flowchart TD
+  subgraph ING["Ingestion layer"]
+    WA["WhatsApp\nBusiness API"]
+    EM["Email\nIMAS/SMTP"]
+    PO["PDF / file\nupload portal"]
+    VC["Voice\ncommand"]
+  end
+
+  subgraph COMM["Communication agent"]
+    NLP["NLP intent\nparser"]
+    TRL["Arabic ↔ English\ntranslation"]
+    OCR["Document intelligence\nOCR + table extract"]
+  end
+
+  subgraph ORCH["Workflow engine — deterministic saga"]
+    WFE["State machine\nTemporal"]
+    PR["Prompt registry\nversioned + fallback"]
+    LLM["LLM router\nOpenAI → Claude → Gemini → Ollama"]
+  end
+
+  subgraph AGENTS["AI agents"]
+    POA["PO extraction\nagent"]
+    HSA["HS validation\nagent"]
+    DGA["Document generation\nagent"]
+    CMA["Compliance\nagent"]
+    FNA["Finance\nagent"]
+    LGA["Logistics\nagent"]
+    SVA["Supervisor\nagent"]
+  end
+
+  subgraph HITL["Human-in-the-loop"]
+    AQ["Approval queue\nwith SLA timer"]
+    DV["Document diff\nviewer"]
+    AUD["Audit trail\nimmutable log"]
+    ACT["Approve / reject /\nrequest changes"]
+  end
+
+  subgraph MEM["Memory + context layer — moat"]
+    BMP["Buyer memory\nprofile"]
+    RMP["Route memory\nprofile"]
+    VEC["pgvector\nsemantic search"]
+    OBS["Memory observer\nauto-learns from events"]
+  end
+
+  subgraph DATA["Data layer"]
+    PG["PostgreSQL 16\n+ pgvector"]
+    RD["Redis\nhot cache"]
+    S3["S3 / GCS\ndocument store"]
+    KB["Kafka\nevent bus"]
+  end
+
+  subgraph RBAC["Security + tenancy"]
+    JWT["JWT auth\norg_id scoped"]
+    RBA["RBAC\n8 roles · 25 perms"]
+    ARC["Approval rule\nengine"]
+  end
+
+  subgraph INT["Integrations"]
+    ERP["ERP\nTally · Zoho · SAP"]
+    CAR["Carriers\nDHL · FedEx · Maersk"]
+    GOV["Gov portals\nDGFT · ICEGATE · UAE Customs"]
+    BNK["Banks\nLC · Swift · ECGC"]
+  end
+
+  WA & EM & PO & VC --> COMM
+  COMM --> WFE
+  WFE --> PR --> LLM
+  WFE --> POA & HSA & DGA & CMA & FNA & LGA
+  SVA --> WFE
+  POA & HSA & DGA --> SVA
+  SVA --> AQ
+  AQ --> DV & AUD
+  ACT --> WFE
+  DV & AUD --> ACT
+  AGENTS <--> MEM
+  MEM <--> VEC
+  OBS --> BMP & RMP
+  AGENTS --> KB
+  KB --> OBS
+  PG & RD & S3 --> AGENTS
+  WFE --> PG & KB
+  JWT & RBA --> WFE
+  ARC --> AQ
+  DGA --> S3
+  LGA --> CAR
+  CMA --> GOV
+  FNA --> BNK & ERP
+`;
+
+const { svg } = await mermaid.render('arch-svg', graph);
+document.getElementById('diagram').innerHTML = svg;
+</script>

@@ -1,0 +1,91 @@
+---
+config:
+  layout: elk
+---
+flowchart TD
+  subgraph ING["Ingestion layer"]
+    WA["WhatsApp\nBusiness API"]
+    EM["Email\nIMAS/SMTP"]
+    PO["PDF / file\nupload portal"]
+    VC["Voice\ncommand"]
+  end
+
+  subgraph COMM["Communication agent"]
+    NLP["NLP intent\nparser"]
+    TRL["Arabic ↔ English\ntranslation"]
+    OCR["Document intelligence\nOCR + table extract"]
+  end
+
+  subgraph ORCH["Workflow engine — deterministic saga"]
+    WFE["State machine\nTemporal"]
+    PR["Prompt registry\nversioned + fallback"]
+    LLM["LLM router\nOpenAI → Claude → Gemini → Ollama"]
+  end
+
+  subgraph AGENTS["AI agents"]
+    POA["PO extraction\nagent"]
+    HSA["HS validation\nagent"]
+    DGA["Document generation\nagent"]
+    CMA["Compliance\nagent"]
+    FNA["Finance\nagent"]
+    LGA["Logistics\nagent"]
+    SVA["Supervisor\nagent"]
+  end
+
+  subgraph HITL["Human-in-the-loop"]
+    AQ["Approval queue\nwith SLA timer"]
+    DV["Document diff\nviewer"]
+    AUD["Audit trail\nimmutable log"]
+    ACT["Approve / reject /\nrequest changes"]
+  end
+
+  subgraph MEM["Memory + context layer — moat"]
+    BMP["Buyer memory\nprofile"]
+    RMP["Route memory\nprofile"]
+    VEC["pgvector\nsemantic search"]
+    OBS["Memory observer\nauto-learns from events"]
+  end
+
+  subgraph DATA["Data layer"]
+    PG["PostgreSQL 16\n+ pgvector"]
+    RD["Redis\nhot cache"]
+    S3["S3 / GCS\ndocument store"]
+    KB["Kafka\nevent bus"]
+  end
+
+  subgraph RBAC["Security + tenancy"]
+    JWT["JWT auth\norg_id scoped"]
+    RBA["RBAC\n8 roles · 25 perms"]
+    ARC["Approval rule\nengine"]
+  end
+
+  subgraph INT["Integrations"]
+    ERP["ERP\nTally · Zoho · SAP"]
+    CAR["Carriers\nDHL · FedEx · Maersk"]
+    GOV["Gov portals\nDGFT · ICEGATE · UAE Customs"]
+    BNK["Banks\nLC · Swift · ECGC"]
+  end
+
+  WA & EM & PO & VC --> COMM
+  COMM --> WFE
+  WFE --> PR --> LLM
+  WFE --> POA & HSA & DGA & CMA & FNA & LGA
+  SVA --> WFE
+  POA & HSA & DGA --> SVA
+  SVA --> AQ
+  AQ --> DV & AUD
+  ACT --> WFE
+  DV & AUD --> ACT
+  AGENTS <--> MEM
+  MEM <--> VEC
+  OBS --> BMP & RMP
+  AGENTS --> KB
+  KB --> OBS
+  PG & RD & S3 --> AGENTS
+  WFE --> PG & KB
+  JWT & RBA --> WFE
+  ARC --> AQ
+  DGA --> S3
+  LGA --> CAR
+  CMA --> GOV
+  FNA --> BNK & ERP
