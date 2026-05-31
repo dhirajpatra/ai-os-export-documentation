@@ -62,6 +62,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    org_name: str = Field(..., min_length=2)
+    name: str = Field(..., min_length=2)
+    email: str = Field(..., pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")
+    password: str = Field(..., min_length=6)
+
+
 class WhatsAppWebhookPayload(BaseModel):
     object: str
     entry: list[dict]
@@ -209,15 +216,115 @@ async def setup_demo_admin(
 
 # ── AUTHENTICATION ────────────────────────────
 
+@router.post("/api/v1/auth/register")
+async def register(body: RegisterRequest):
+    """
+    Onboard a new organization and create its primary owner user account.
+    Initiates an active session immediately.
+    """
+    import re
+    import secrets
+    from core.db import get_pool
+    
+    pool = get_pool()
+    async with pool.acquire() as db:
+        # Check if email is already taken
+        existing_user = await db.fetchval(
+            "SELECT id FROM users WHERE email = $1",
+            body.email
+        )
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email address is already registered.",
+            )
+            
+        # Create a unique organization slug
+        org_slug = body.org_name.lower().strip()
+        org_slug = re.sub(r'[^a-z0-9\s-]', '', org_slug)
+        org_slug = re.sub(r'[\s-]+', '-', org_slug)
+        if not org_slug:
+            org_slug = "organization"
+            
+        base_slug = org_slug
+        suffix = 1
+        while True:
+            exists = await db.fetchval("SELECT id FROM organizations WHERE slug = $1", org_slug)
+            if not exists:
+                break
+            org_slug = f"{base_slug}-{suffix}"
+            suffix += 1
+            
+        # Create organization and user within a single transaction
+        async with db.transaction():
+            # Insert organization
+            org_id = await db.fetchval(
+                """
+                INSERT INTO organizations (name, slug)
+                VALUES ($1, $2)
+                RETURNING id;
+                """,
+                body.org_name,
+                org_slug
+            )
+            
+            # Insert owner user
+            user_id = await db.fetchval(
+                """
+                INSERT INTO users (org_id, email, name, role, password_hash, auth_provider)
+                VALUES ($1, $2, $3, 'owner', crypt($4, gen_salt('bf')), 'email')
+                RETURNING id;
+                """,
+                org_id,
+                body.email,
+                body.name,
+                body.password
+            )
+            
+            # Generate cryptographically secure session token
+            session_token = secrets.token_hex(32)
+            
+            # Insert into user_sessions
+            from datetime import datetime, timedelta
+            expires_at = datetime.utcnow() + timedelta(days=1)
+            
+            await db.execute(
+                """
+                INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+                VALUES ($1, $2, $3, $4);
+                """,
+                user_id,
+                org_id,
+                session_token,
+                expires_at
+            )
+            
+        return {
+            "access_token": session_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user_id),
+                "name": body.name,
+                "email": body.email,
+                "role": "owner",
+                "org_id": str(org_id)
+            },
+            "organization": {
+                "id": str(org_id),
+                "name": body.org_name,
+                "slug": org_slug
+            }
+        }
+
+
 @router.post("/api/v1/auth/login")
 async def login(body: LoginRequest):
     """
-    Authenticate a user using pgcrypto for password verification and return a JWT.
+    Authenticate a user, generate a secure session token, and persist it in user_sessions.
     """
+    import secrets
     from core.db import get_pool
-    from core.rbac import create_access_token, TokenPayload
-    import time
-    from core.config import cfg
+    from datetime import datetime, timedelta
     
     pool = get_pool()
     async with pool.acquire() as db:
@@ -251,21 +358,24 @@ async def login(body: LoginRequest):
             row["id"]
         )
         
-        # Generate JWT token
-        payload = TokenPayload(
-            sub=str(row["id"]),
-            org_id=str(row["org_id"]),
-            role=row["role"],
-            email=row["email"],
-            exp=int(time.time()) + 86400  # 24 hours expiry
+        # Generate secure random session token
+        session_token = secrets.token_hex(32)
+        expires_at = datetime.utcnow() + timedelta(days=1)
+        
+        # Save session in database
+        await db.execute(
+            """
+            INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+            VALUES ($1, $2, $3, $4);
+            """,
+            row["id"],
+            row["org_id"],
+            session_token,
+            expires_at
         )
         
-        # Ensure we have a default secret if not explicitly configured
-        secret = getattr(cfg, "JWT_SECRET", "super-secret-key-change-in-prod")
-        token = create_access_token(payload, secret)
-        
         return {
-            "access_token": token,
+            "access_token": session_token,
             "token_type": "bearer",
             "user": {
                 "id": str(row["id"]),
@@ -275,6 +385,213 @@ async def login(body: LoginRequest):
                 "org_id": str(row["org_id"])
             }
         }
+
+
+@router.post("/api/v1/auth/logout")
+async def logout(request: Request):
+    """
+    Invalidate the active user session.
+    """
+    from core.db import get_pool
+    
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing or invalid Authorization header",
+        )
+        
+    token = auth_header.split(" ")[1]
+    
+    pool = get_pool()
+    async with pool.acquire() as db:
+        await db.execute(
+            """
+            UPDATE user_sessions
+            SET is_active = FALSE, updated_at = NOW()
+            WHERE token = $1;
+            """,
+            token
+        )
+        
+    return {"status": "success", "message": "Logged out successfully."}
+
+
+@router.get("/api/v1/auth/google/login")
+async def google_login():
+    """
+    Redirect the user to Google's OAuth 2.0 authorization page.
+    """
+    import urllib.parse
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id")
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://exportagent.online/api/v1/auth/google/callback")
+    
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "select_account"
+    }
+    
+    url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url)
+
+
+@router.get("/api/v1/auth/google/callback")
+async def google_callback(code: str):
+    """
+    Handle the OAuth 2.0 callback, exchange code for user profile,
+    and initiate a secure multi-tenant session.
+    """
+    import secrets
+    import httpx
+    import re
+    from core.db import get_pool
+    from datetime import datetime, timedelta
+    from fastapi.responses import RedirectResponse
+    
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "your-google-client-id")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "your-google-client-secret")
+    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://exportagent.online/api/v1/auth/google/callback")
+    
+    # 1. Exchange the code for the tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(token_url, data=data)
+        if token_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Google token exchange failed: {token_resp.text}"
+            )
+        tokens = token_resp.json()
+        id_token = tokens.get("id_token")
+        
+        # 2. Verify the ID token and get the user's profile
+        info_resp = await client.get(f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}")
+        if info_resp.status_code != 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to verify Google ID token"
+            )
+        profile = info_resp.json()
+        
+    google_sub = profile.get("sub")
+    email = profile.get("email")
+    name = profile.get("name", email.split("@")[0])
+    
+    if not google_sub or not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing unique identifiers in Google profile"
+        )
+        
+    pool = get_pool()
+    async with pool.acquire() as db:
+        # Check if user already exists (linked by google_sub or email)
+        row = await db.fetchrow(
+            """
+            SELECT id, org_id, role, is_active
+            FROM users
+            WHERE google_sub = $1 OR email = $2;
+            """,
+            google_sub,
+            email
+        )
+        
+        if row:
+            if not row["is_active"]:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account is inactive. Please contact support."
+                )
+            
+            user_id = row["id"]
+            org_id = row["org_id"]
+            
+            # Ensure google_sub and auth_provider are stored/updated
+            await db.execute(
+                """
+                UPDATE users
+                SET google_sub = COALESCE(google_sub, $1),
+                    auth_provider = 'google',
+                    last_login_at = NOW()
+                WHERE id = $2;
+                """,
+                google_sub,
+                user_id
+            )
+        else:
+            # User does not exist, onboard them as a new tenant
+            org_name = f"{name}'s Organization"
+            org_slug = org_name.lower().strip()
+            org_slug = re.sub(r'[^a-z0-9\s-]', '', org_slug)
+            org_slug = re.sub(r'[\s-]+', '-', org_slug)
+            if not org_slug:
+                org_slug = "organization"
+                
+            base_slug = org_slug
+            suffix = 1
+            while True:
+                exists = await db.fetchval("SELECT id FROM organizations WHERE slug = $1", org_slug)
+                if not exists:
+                    break
+                org_slug = f"{base_slug}-{suffix}"
+                suffix += 1
+                
+            async with db.transaction():
+                org_id = await db.fetchval(
+                    """
+                    INSERT INTO organizations (name, slug)
+                    VALUES ($1, $2)
+                    RETURNING id;
+                    """,
+                    org_name,
+                    org_slug
+                )
+                
+                user_id = await db.fetchval(
+                    """
+                    INSERT INTO users (org_id, email, name, role, auth_provider, google_sub)
+                    VALUES ($1, $2, $3, 'owner', 'google', $4)
+                    RETURNING id;
+                    """,
+                    org_id,
+                    email,
+                    name,
+                    google_sub
+                )
+                
+        # Create active user session
+        session_token = secrets.token_hex(32)
+        expires_at = datetime.utcnow() + timedelta(days=1)
+        
+        await db.execute(
+            """
+            INSERT INTO user_sessions (user_id, org_id, token, expires_at)
+            VALUES ($1, $2, $3, $4);
+            """,
+            user_id,
+            org_id,
+            session_token,
+            expires_at
+        )
+        
+    # Redirect user back to the frontend dashboard with their active session token in the URL query string
+    frontend_url = os.getenv("FRONTEND_URL", "https://exportagent.online")
+    return RedirectResponse(
+        url=f"{frontend_url.rstrip('/')}/dashboard?token={session_token}"
+    )
 
 
 # ── WHATSAPP WEBHOOK INTERFACES ───────────────
@@ -759,6 +1076,75 @@ async def action_approval(
             resumed_status,
             row["workflow_id"],
         )
+
+        # ── Trigger learning from human corrections ───────────────────────
+        # If the reviewer changed any fields (field_overrides is not empty),
+        # call resume_from_approval so corrections get saved to hitl_corrections
+        # and the buyer template gets updated — this is what makes the system
+        # improve per org over time.
+        # We do this for both approve and request_changes actions.
+        if body.field_overrides and body.action in ("approve", "request_changes"):
+            try:
+                from core.workflow_engine import get_engine
+                engine = get_engine(workflow_id)
+                if engine:
+                    # Engine still alive in memory (same Railway instance)
+                    await engine._save_corrections_and_learn(body.field_overrides)
+                    print(f"[Approval] template learning triggered for workflow {workflow_id}")
+                else:
+                    # Engine is gone (different instance or restarted)
+                    # Fall back to direct TemplateMatcher.learn() using DB data
+                    order_data = await db.fetchrow(
+                        "SELECT po_raw_text, extracted_data FROM orders WHERE id = $1",
+                        row["order_id"],
+                    )
+                    if order_data and order_data["po_raw_text"]:
+                        from services.agents.template_matcher import TemplateMatcher
+                        import json as _json
+                        existing = {}
+                        if order_data["extracted_data"]:
+                            raw = order_data["extracted_data"]
+                            existing = _json.loads(raw) if isinstance(raw, str) else raw
+                        corrected = {**existing, **body.field_overrides}
+                        buyer_name = corrected.get("buyer_name", "")
+                        if buyer_name:
+                            await TemplateMatcher.learn(
+                                raw_text   = order_data["po_raw_text"],
+                                extracted  = corrected,
+                                org_id     = str(ctx.org_id),
+                                buyer_name = buyer_name,
+                                llm_used   = False,
+                            )
+                            print(f"[Approval] fallback template learning done for '{buyer_name}'")
+
+                # Save corrections to hitl_corrections table directly as well
+                # (engine._save_corrections_and_learn does this too, but only
+                #  if engine is alive — this ensures the audit trail is always written)
+                from services.agents.template_matcher import buyer_key_from_name
+                buyer_name_for_key = body.field_overrides.get("buyer_name", "") or ""
+                bk = buyer_key_from_name(buyer_name_for_key) if buyer_name_for_key else None
+                for field_name, new_value in body.field_overrides.items():
+                    await db.execute(
+                        """
+                        INSERT INTO hitl_corrections (
+                            org_id, workflow_id, order_id,
+                            buyer_key, field_name,
+                            correct_value, correction_source, corrected_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        ctx.org_id,
+                        row["workflow_id"],
+                        row["order_id"],
+                        bk,
+                        field_name,
+                        str(new_value),
+                        "hitl_approval",
+                        ctx.user_id,
+                    )
+            except Exception as learn_exc:
+                # Never block the approval response — learning is best-effort
+                print(f"[Approval] template learning error (non-fatal): {learn_exc}")
 
         if body.action == "approve" and row["order_id"]:
             # Update order status

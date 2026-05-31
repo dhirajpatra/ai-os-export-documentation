@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS users (
     role            TEXT NOT NULL DEFAULT 'operator'
                         CHECK (role IN ('owner','admin','manager','operator','viewer')),
     password_hash   TEXT,
+    auth_provider   TEXT NOT NULL DEFAULT 'email' CHECK (auth_provider IN ('email', 'google')),
+    google_sub      TEXT UNIQUE,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     last_login_at   TIMESTAMPTZ,
     preferences     JSONB NOT NULL DEFAULT '{}',
@@ -46,6 +48,22 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_org ON users(org_id);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    org_id          UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    token           TEXT NOT NULL UNIQUE,
+    ip_address      INET,
+    user_agent      TEXT,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_token ON user_sessions(user_id, token);
+CREATE INDEX IF NOT EXISTS idx_sessions_org ON user_sessions(org_id);
 
 -- ─── 2. CONTACTS (Buyers / Suppliers) ──────────────────────
 
@@ -262,7 +280,7 @@ CREATE INDEX IF NOT EXISTS idx_approvals_assigned ON approval_requests(assigned_
 -- ─── 8. AUDIT TRAIL ───────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS audit_log (
-    id              BIGSERIAL,
+    id              BIGSERIAL PRIMARY KEY,
     org_id          UUID NOT NULL,
     actor_type      TEXT NOT NULL CHECK (actor_type IN ('user','agent','system')),
     actor_id        TEXT NOT NULL,                     -- user UUID or agent name
@@ -274,18 +292,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     metadata        JSONB NOT NULL DEFAULT '{}',
     ip_address      INET,
     user_agent      TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, created_at)   -- partition key must be part of PK
-) PARTITION BY RANGE (created_at);
-
--- Monthly partitions
-CREATE TABLE IF NOT EXISTS audit_log_2025_01 PARTITION OF audit_log
-    FOR VALUES FROM ('2025-01-01') TO ('2025-02-01');
-CREATE TABLE IF NOT EXISTS audit_log_2025_02 PARTITION OF audit_log
-    FOR VALUES FROM ('2025-02-01') TO ('2025-03-01');
-CREATE TABLE IF NOT EXISTS audit_log_2025_03 PARTITION OF audit_log
-    FOR VALUES FROM ('2025-03-01') TO ('2025-04-01');
-CREATE TABLE IF NOT EXISTS audit_log_default  PARTITION OF audit_log DEFAULT;
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE INDEX IF NOT EXISTS idx_audit_org_entity ON audit_log(org_id, entity_type, entity_id);
 

@@ -343,17 +343,69 @@ app.add_middleware(
 )
 
 
-# ── Dependency: org context from JWT ──────────
+# ── Dependency: org context from database session ──────────
 async def get_org_context(request: Request) -> OrgContext:
     """
-    In production: validate JWT, extract org_id + user_id + role.
-    Enforce row-level security for all DB queries using org_id.
+    Validate the session token passed in the Authorization header.
+    Resolves the organization ID, user ID, and role from the active database sessions.
     """
-    return OrgContext(
-        org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
-        user_id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
-        role="operator",
-    )
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header is missing",
+        )
+        
+    # Support development bypass token
+    if auth_header in ("Bearer dev-token", "dev-token"):
+        return OrgContext(
+            org_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            user_id=uuid.UUID("00000000-0000-0000-0000-000000000002"),
+            role="owner",
+        )
+        
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization scheme. Use 'Bearer <token>'",
+        )
+        
+    token = auth_header.split(" ")[1]
+    
+    from core.db import get_pool
+    try:
+        pool = get_pool()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database pool is not initialized",
+        ) from exc
+        
+    async with pool.acquire() as db:
+        row = await db.fetchrow(
+            """
+            SELECT s.org_id, s.user_id, u.role
+            FROM user_sessions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.token = $1
+              AND s.is_active = TRUE
+              AND s.expires_at > NOW()
+              AND u.is_active = TRUE;
+            """,
+            token
+        )
+        
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired session token",
+            )
+            
+        return OrgContext(
+            org_id=row["org_id"],
+            user_id=row["user_id"],
+            role=row["role"]
+        )
 
 
 # ─────────────────────────────────────────────

@@ -34,8 +34,7 @@ import uuid
 from services.agents.base import BaseAgent
 from services.agents.rule_based_extractor import RuleBasedExtractor
 from services.agents.template_matcher import TemplateMatcher
-from services.api.main import parse_llm_json
-from core.config import cfg
+from core.config import cfg, parse_llm_json
 
 
 class POExtractionAgent(BaseAgent):
@@ -55,15 +54,23 @@ Do not hallucinate values.
         source   = input_data["source"]
         raw_text = input_data.get("raw_text", "")
         org_id   = str(self.org_id)
+        # Per-org extraction rules loaded in step_extract_po and passed through
+        org_rules = input_data.get("_org_rules", {})
+
+        # Skip early exits for formal PDFs, long text, or multi-item documents
+        is_file = (source == "file" or bool(input_data.get("file_bytes")))
+        is_long_text = len(raw_text) > 1000
+        is_multi = self._is_multi_item(raw_text)
+        force_llm = is_file or is_long_text or is_multi
 
         # ── LAYER 1: Rule-based extraction ───────────────────────────────
-        rule_result = RuleBasedExtractor.extract(raw_text)
+        rule_result = RuleBasedExtractor.extract(raw_text, org_overrides=org_rules)
         print(
             f"[POExtraction] Layer1/rule-based confidence={rule_result['confidence']:.1f} "
-            f"threshold={cfg.CONFIDENCE_THRESHOLD_AUTO}"
+            f"threshold={cfg.CONFIDENCE_THRESHOLD_AUTO} force_llm={force_llm}"
         )
 
-        if rule_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
+        if not force_llm and rule_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
             print("[POExtraction] ✅ Rule-based sufficient — skipping LLM")
             self._emit_event("po.extracted", {
                 "org_id":                str(self.org_id),
@@ -88,7 +95,7 @@ Do not hallucinate values.
                 f"[POExtraction] Layer2/template confidence={tm_result['confidence']:.1f} "
                 f"buyer='{tm_result.get('_template_buyer')}'"
             )
-            if tm_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
+            if not force_llm and tm_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
                 print("[POExtraction] ✅ Template match sufficient — skipping LLM")
                 self._emit_event("po.extracted", {
                     "org_id":                str(self.org_id),
@@ -244,3 +251,17 @@ Do not hallucinate values.
                 {"field": "string", "question": "string", "blocking": True}
             ],
         }
+
+    def _is_multi_item(self, text: str) -> bool:
+        import re
+        from services.agents.rule_based_extractor import COMMODITY_HS, _QTY, _QTY_BARE
+        t_lower = (text or "").lower()
+        # Count quantity matches
+        qty_matches = list(_QTY.finditer(t_lower)) or list(_QTY_BARE.finditer(t_lower))
+        if len(qty_matches) > 1:
+            return True
+        # Count commodity matches
+        commodities = [c for c in COMMODITY_HS.keys() if c in t_lower]
+        if len(commodities) > 1:
+            return True
+        return False

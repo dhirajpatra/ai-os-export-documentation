@@ -87,7 +87,7 @@ tradeos/
 │       Tables:
 │       organizations, users, contacts, products,
 │       orders, order_items, documents, workflows, workflow_steps,
-│       approval_requests, audit_log (partitioned by month),
+│       approval_requests, audit_log,
 │       agent_memory (with vector(1536) column),
 │       prompt_registry, messages, shipments, shipment_events,
 │       hs_codes, country_trade_rules

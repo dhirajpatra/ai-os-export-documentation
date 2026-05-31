@@ -7,8 +7,7 @@ Returns requires_clarification for unknown/missing HS codes.
 
 import json
 from services.agents.base import BaseAgent
-from services.api.main import parse_llm_json
-from core.config import cfg
+from core.config import cfg, parse_llm_json
 
 
 class HSCodeValidationAgent(BaseAgent):

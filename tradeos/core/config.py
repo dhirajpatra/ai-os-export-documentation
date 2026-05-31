@@ -147,7 +147,7 @@ class LLMRouter:
         cache_content = f"{system_prompt}|{user_prompt}|{json.dumps(output_schema)}|{max_tokens}|{temperature}"
         cache_key = generate_cache_key("llm", cache_content)
         
-        cached_result = cache_get(cache_key)
+        cached_result = await cache_get(cache_key)
         if cached_result:
             print(f"[LLMRouter] ⚡ Cache hit for prompt: {cache_key}")
             return cached_result
@@ -163,7 +163,7 @@ class LLMRouter:
                 result["provider_used"] = provider_cfg["provider"]
                 
                 # 2. Store in Redis Cache for 5 mins
-                cache_set(cache_key, result, ttl_seconds=300)
+                await cache_set(cache_key, result, ttl_seconds=300)
                 
                 return result
             except Exception as e:

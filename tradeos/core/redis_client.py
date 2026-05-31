@@ -104,3 +104,12 @@ async def cache_set(key: str, value: dict, ttl_seconds: int = 300) -> None:
         await r.setex(key, ttl_seconds, json.dumps(value))
     except Exception as exc:
         print(f"[Redis] cache_set error: {exc}")
+
+
+import hashlib
+
+def generate_cache_key(prefix: str, content: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(content.encode("utf-8"))
+    return f"{prefix}:{hasher.hexdigest()}"
+
