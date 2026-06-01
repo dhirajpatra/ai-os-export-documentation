@@ -421,6 +421,73 @@ Dashboard shows:
 | Frontend | Next.js + React (separate repo) |
 | Observability | OpenTelemetry + Prometheus |
 
+Searched for "guardrail"
+Listed directory AI-OS-Export-Documentation
+Listed directory tradeos
+Listed directory agents
+Listed directory core
+Viewed po_extraction.py:1-268
+Viewed .env:1-99
+Viewed requirements.txt:1-79
+Viewed hs_validation.py:1-102
+Searched for "confidence"
+Viewed workflow_engine.py:199-998
+Searched for "HITLOrchestrator"
+Viewed main.py:1-428
+Listed directory api
+Searched for "guard"
+Searched for "validate"
+Searched for "guardrail"
+Searched for "compliance"
+Viewed README.md:1-428
+
+Yes! While the codebase does not use third-party libraries like `guardrails-ai` or NVIDIA’s `NeMo Guardrails` (none are listed in `requirements.txt`), **TradeOS is built from the ground up with structural, regulatory, and operational guardrails**.
+
+Here are the key guardrails implemented in the system:
+
+---
+
+### 1. Human-In-The-Loop (HITL) & Confidence Guardrails
+The core design principle of TradeOS is **"AI operates workflows, humans supervise."** 
+* **`HITLOrchestrator` (`tradeos/services/api/main.py`)**: A deterministic decision engine that evaluates every critical step using confidence scores and risk flags:
+  * **Auto-Approve**: Only triggered if the overall confidence is above the auto threshold ($\ge 60\%$ or $\ge 92\%$ depending on configuration) **and** there are no high-severity or critical flags.
+  * **Soft/Optional Review**: Triggered for moderate confidence scores to allow quick, optional human inspection.
+  * **Hard Block / Mandatory Review**: Triggered if the confidence falls below the human threshold ($< 45\%$) or if there are any high-severity risk flags.
+  * **Absolute Block**: Triggered instantly if **any critical compliance flag** is raised, completely stopping automatic downstream execution (e.g., carrier bookings or buyer notification).
+
+---
+
+### 2. Regulatory & Compliance Guardrail
+* **`HSCodeValidationAgent` (`tradeos/services/agents/hs_validation.py`)**: Validates extracted HS codes against the WCO schedule, India ITC-HS, and UAE GCC tariffs.
+  * Checks export policies (e.g., *Restricted, Prohibited, Canalized, STE*).
+  * Automatically flags restricted routes or prohibited goods, raising **critical severity flags** that block automatic workflow continuation.
+
+---
+
+### 3. LLM Reliability & Fallback Guardrails
+* **LLM Provider Chain (`core/config.py`)**: Protects the system against LLM downtime, rate-limits, or API outages by maintaining a prioritized list of providers (OpenAI $\rightarrow$ Groq $\rightarrow$ xAI $\rightarrow$ Anthropic $\rightarrow$ Gemini $\rightarrow$ Local Ollama). If a higher priority model fails, the system automatically cascades down to ensure execution continuity.
+* **Deterministic Workflow Engine (`tradeos/core/workflow_engine.py`)**: Runs LLMs only as functional tools inside deterministic steps rather than allowing LLMs to orchestrate the workflow itself, ensuring predictable outputs.
+
+---
+
+### 4. Security & Data Isolation Guardrails
+* **Multi-Tenant Scoping**: Every database query, state transition, and API endpoint is strictly partitioned by `org_id`.
+* **RBAC & Session Validation (`tradeos/core/rbac.py`)**: Validates JWTs, session expiration, and user activation states strictly before resolving organization context via the `get_org_context` dependency.
+
+---
+
+### 5. Cost & Hallucination Guardrails
+* **Three-Layer PO Extraction (`tradeos/services/agents/po_extraction.py`)**: 
+  * **Layer 1** uses high-precision local regex/rules (`RuleBasedExtractor`).
+  * **Layer 2** uses buyer layouts matched from Redis (`TemplateMatcher`).
+  * Only when both layers fail to meet the confidence threshold does the system fall back to **Layer 3 (LLM)**. This acts as a robust cost and hallucination guardrail.
+
+---
+
+### Summary of Work Done
+* Scanned the workspace directories and checked files for any external guardrail package integrations.
+* Analyzed `po_extraction.py`, `hs_validation.py`, `workflow_engine.py`, `main.py`, and `README.md` to map out the system's operational and architectural guardrails.
+
 ---
 
 *Built for India–GCC trade. Extensible to any corridor.*  
