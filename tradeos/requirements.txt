@@ -16,9 +16,6 @@ pgvector==0.2.*                  # pgvector Python client
 # ── Cache ─────────────────────────────────────────────────
 redis[hiredis]==5.0.*
 
-# ── Messaging ─────────────────────────────────────────────
-aiokafka==0.10.*
-
 # ── Workflow (Temporal) ───────────────────────────────────
 temporalio==1.5.*
 

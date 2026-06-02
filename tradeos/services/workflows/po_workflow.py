@@ -136,15 +136,6 @@ class KillerDemoWorkflow:
             "ts":     datetime.utcnow().isoformat(),
             "data":   data or {},
         }
-        try:
-            from core.kafka_producer import send_event
-            await send_event("workflow_events", f"workflow.{step}.{status}", {
-                "workflow_id": state.get("workflow_id"),
-                "org_id":      str(self.org_id),
-                **entry,
-            })
-        except Exception as exc:
-            print(f"[Kafka] log failed: {exc}")
         return [entry]
 
     # ── Nodes ─────────────────────────────────────────────

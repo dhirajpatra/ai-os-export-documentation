@@ -1710,20 +1710,6 @@ async def list_shipments(
         )
 
 
-@router.get("/api/v1/stream/kafka")
-async def stream_kafka_events():
-    """SSE endpoint to stream Kafka messages to the browser for debugging."""
-    async def event_generator():
-        yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-"""
-Paste this into services/api/routes.py — one new endpoint.
-
-Add this import near the top of routes.py:
-    from services.agents.template_matcher import list_templates
-"""
-
 @router.get("/api/v1/templates")
 async def get_learned_templates(
     ctx: OrgContext = Depends(get_org_context),

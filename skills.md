@@ -325,7 +325,6 @@ Everything runs in centralized cloud infrastructure.
 
 ### Messaging
 
-• Kafka
 • RabbitMQ
 • NATS
 

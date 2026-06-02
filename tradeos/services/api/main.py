@@ -238,7 +238,7 @@ def render_readme_html() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────
-    print("🚀 TradeOS API starting — connecting to Redis, DB, Kafka, Temporal…")
+    print("🚀 TradeOS API starting — connecting to Redis, DB, Temporal…")
 
     # ① Redis — init first so SSE bus is ready before any request lands.
     #    Uses REDIS_URL from .env (Upstash rediss:// URL).
@@ -277,8 +277,6 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Knowledge base seed failed: {exc}")
         print("   FAQ/RAG answers will fall back to hardcoded replies.")
 
-    # ⑤ Kafka (unchanged — disabled)
-    print("ℹ️  Kafka integration is disabled")
 
     yield
 

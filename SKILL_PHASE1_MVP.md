@@ -15,7 +15,7 @@ Phase 1 is **substantially complete**. The following files exist and are product
 | `core/prompt_registry.py` | Versioned prompts for all agents (v2–v4), fallback chains, fingerprint hashing |
 | `core/rbac.py` | JWT auth, 8 roles, 25 permissions, approval rule engine, tenant resolver |
 | `schemas/001_core_schema.sql` | Full PostgreSQL schema: orgs, users, orders, documents, workflows, approvals, audit_log, agent_memory |
-| `docker-compose.yml` | Full infra stack: Postgres+pgvector, Redis, Kafka, Temporal, PaddleOCR, Ollama, ngrok |
+| `docker-compose.yml` | Full infra stack: Postgres+pgvector, Redis, Temporal, PaddleOCR, Ollama, ngrok |
 | `requirements.txt` | All Python dependencies pinned |
 
 **Goal of Phase 1:** Replace 50% of manual documentation staff workload.  
@@ -62,7 +62,7 @@ Ingestion
 - PostgreSQL: orders, order_items, documents, workflows, workflow_steps, approval_requests, audit_log, messages, shipments
 - Redis: hot cache for tenant resolution, rate limiting
 - S3/GCS: generated PDF storage (invoice, packing list)
-- Kafka: workflow events → memory observer
+- SSE/WebSockets: workflow events → memory observer
 
 ---
 
@@ -228,7 +228,7 @@ Priority order is in `Settings.LLM_CHAIN`. Do not hardcode a model anywhere in b
 
 ```bash
 # 1. Infrastructure
-docker compose up -d postgres redis kafka
+docker compose up -d postgres redis
 
 # 2. Run schema
 docker exec -i tradeos-postgres-1 psql -U tradeos tradeos < schemas/001_core_schema.sql

@@ -91,7 +91,7 @@ One documentation executive in a export or freight forwarding company using Trad
 | **Deterministic workflow engine** | LLMs are tools called within steps — not orchestrators. |
 | **Memory-first** | Agents learn and improve with every transaction. This is the moat. |
 | **HITL by design** | Safe autonomy, not full autonomy. Enterprise trust requires human checkpoints. |
-| **Event-driven** | Every action emits events. Kafka powers async, auditable, replay-able operations. |
+| **Event-driven** | Every action emits events. SSE and WebSockets power async, auditable operations. |
 | **Multi-tenant** | Row-level security. Every query is scoped to org_id. |
 
 ---
@@ -117,7 +117,7 @@ tradeos/
 ├── 001_core_schema.sql          ← Full PostgreSQL schema (multi-tenant, audit-ready)
 │
 ├── config/                      ← Environment configs per deployment
-├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Kafka, Temporal, OCR
+├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Temporal, OCR
 └── requirements.txt
 ```
 
@@ -261,14 +261,6 @@ docker compose --profile dev up ngrok
 # ngrok http 8000 --url=preindulgent-madonna-reliably.ngrok-free.dev
 ```
 
-### To Monitor Kafka Streams
-```bash
-docker exec -it api kafka-console-consumer \
-  --bootstrap-server kafka:9092 \
-  --topic workflow_events \
-  --from-beginning
-```
----
 
 ## Key API Endpoints
 
@@ -411,7 +403,7 @@ Dashboard shows:
 | API | FastAPI + uvicorn (async) |
 | DB | PostgreSQL 16 + pgvector |
 | Cache | Redis |
-| Events | Kafka |
+| Events | SSE / WebSockets |
 | Workflow | Temporal (durable execution) |
 | OCR | PaddleOCR + Azure Document Intelligence |
 | LLMs | OpenAI → Anthropic → Gemini → Ollama |

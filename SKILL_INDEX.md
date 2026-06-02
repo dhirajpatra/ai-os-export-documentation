@@ -97,7 +97,6 @@ tradeos/
 │   • api (FastAPI, port 8000)
 │   • postgres (pgvector/pgvector:pg16, port 5432)
 │   • redis (redis:7-alpine, port 6379)
-│   • zookeeper + kafka (confluent, port 9092)
 │   • temporal (auto-setup:1.22, port 7233)
 │   • temporal-ui (port 8088)
 │   • ocr (PaddleOCR service, port 8100)
@@ -106,7 +105,7 @@ tradeos/
 │
 └── requirements.txt               ← All Python deps pinned
     Key packages: fastapi, asyncpg, sqlalchemy[asyncio], alembic,
-                  pgvector, aiokafka, temporalio, anthropic, openai,
+                  pgvector, temporalio, anthropic, openai,
                   google-generativeai, paddleocr, weasyprint,
                   sentence-transformers, python-jose, boto3
 ```
@@ -162,7 +161,7 @@ When a model changes behaviour, bump the prompt version. Old version remains act
 - PostgreSQL (pgvector/pg16): all structured data + vector embeddings
 - Redis: hot cache, rate limiting, session store
 - S3/GCS: document files (PDF invoices, scanned POs, certificates)
-- Kafka: event bus (workflow events → memory observer → agent learning)
+- SSE / WebSockets: event bus (workflow events → memory observer → agent learning)
 
 ### Layer 8 — Integrations (Phase 2+)
 - Carriers: DHL, FedEx, Maersk APIs
@@ -227,11 +226,11 @@ SELECT * FROM orders WHERE id = $1
 
 ---
 
-## Event system — Kafka topics
+## Event system — SSE events
 
-All workflow events are emitted to Kafka. The `MemoryObserver` subscribes and auto-learns.
+All workflow events are dispatched via SSE/WebSockets. The `MemoryObserver` subscribes and auto-learns.
 
-| Topic | Emitted by | Consumed by |
+| Event / Topic | Emitted by | Consumed by |
 |-------|-----------|-------------|
 | `tradeos.workflow.completed` | WorkflowEngine | MemoryObserver, BriefingEngine |
 | `tradeos.workflow.step.completed` | WorkflowEngine | MemoryObserver, monitoring |
@@ -278,9 +277,8 @@ GEMINI_API_KEY=...
 # Database
 DATABASE_URL=postgresql+asyncpg://tradeos:tradeos@localhost/tradeos
 
-# Cache + messaging
+# Cache
 REDIS_URL=redis://localhost:6379/0
-KAFKA_BOOTSTRAP=localhost:9092
 
 # Workflow
 TEMPORAL_HOST=localhost:7233

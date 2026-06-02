@@ -13,8 +13,6 @@ class WhatsAppService:
         else:
             result = await WhatsAppService._send_meta_text(to, body)
             
-        from core.kafka_producer import send_event
-        await send_event("workflow_events", "whatsapp.sent", {"to": to, "type": "text", "body": body})
         return result
 
     @staticmethod
@@ -25,8 +23,6 @@ class WhatsAppService:
         else:
             result = await WhatsAppService._send_meta_document(to, doc_url, filename, caption)
             
-        from core.kafka_producer import send_event
-        await send_event("workflow_events", "whatsapp.sent", {"to": to, "type": "document", "filename": filename})
         return result
 
     @staticmethod
