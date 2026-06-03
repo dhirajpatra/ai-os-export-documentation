@@ -149,7 +149,7 @@ class WorkflowEngine:
         self._completed_steps: list[str] = []
 
     def on_event(self, fn: Callable):
-        """Register event hook (for Kafka / WebSocket streaming)."""
+        """Register event hook for SSE / WebSocket streaming."""
         self._event_hooks.append(fn)
 
     async def _emit(self, event: str, data: dict):

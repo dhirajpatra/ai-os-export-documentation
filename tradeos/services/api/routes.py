@@ -153,10 +153,21 @@ async def run_killer_demo(
         raw_input=raw_input,
     )
 
-    async def ws_hook(event: dict):
-        pass
+    # Push WorkflowEngine step events to the SSE bus so the frontend
+    # progress panel gets live updates — same as KillerDemoWorkflow does.
+    from services.sse.sse_bus import push_event as _push_event
+    async def sse_hook(event: dict):
+        try:
+            await _push_event(
+                wf_ctx.workflow_id,
+                event.get("event", "step"),
+                event.get("data", {}).get("step", ""),
+                event.get("data", {}),
+            )
+        except Exception:
+            pass   # SSE failure must never block the workflow response
 
-    engine.on_event(ws_hook)
+    engine.on_event(sse_hook)
 
     try:
         result = await engine.run()

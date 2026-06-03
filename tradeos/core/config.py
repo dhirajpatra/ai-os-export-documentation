@@ -37,6 +37,11 @@ class Settings:
         {"provider": "gemini",    "model": os.getenv("GEMINI_MODEL","gemini-2.5-flash-preview-04-17"), "priority": 2},
         {"provider": "openai",    "model": os.getenv("OPENAI_MODEL","gpt-4o"), "priority": 3},
         {"provider": "anthropic", "model": os.getenv("ANTHROPIC_MODEL","claude-sonnet-4-6"), "priority": 4},
+        # Priority 5: local Ollama — runs on customer AI PC in the future local-first architecture.
+        # Currently cloud deployment: used only as last resort fallback.
+        # WARNING: qwen2.5:3b is a 3B model. PO extraction quality will degrade significantly
+        # compared to cloud providers. Acceptable for local-first with a capable local model
+        # (e.g. llama3.1:8b or qwen2.5:7b). Set OLLAMA_MODEL in .env accordingly.
         {"provider": "local",     "model": os.getenv("OLLAMA_MODEL", "qwen2.5:3b"), "priority": 5},
     ]
 
