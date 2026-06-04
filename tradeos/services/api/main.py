@@ -238,11 +238,9 @@ def render_readme_html() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ────────────────────────────────────────────
-    print("🚀 TradeOS API starting — connecting to Redis, DB, Temporal…")
+    print("🚀 TradeOS API starting — connecting to Redis, DB…")
 
-    # ① Redis — init first so SSE bus is ready before any request lands.
-    #    Uses REDIS_URL from .env (Upstash rediss:// URL).
-    #    Non-fatal: REST APIs keep working even if Redis is down.
+    # ① Redis — init first so SSE bus is ready before any request lands
     try:
         from core.redis_client import init_redis
         await init_redis()
@@ -251,7 +249,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Redis connection failed: {exc}")
         print("   SSE streaming will be unavailable. Check REDIS_URL in Railway env vars.")
 
-    # ② pypdf availability check (unchanged)
+    # ② pypdf availability check
     try:
         from pypdf import PdfReader
         print("✅ pypdf available — text-layer PDF extraction enabled")
@@ -259,22 +257,16 @@ async def lifespan(app: FastAPI):
         print("⚠️  pypdf NOT installed. PDF text extraction will fall back to PaddleOCR.")
         print("   Fix: add 'pypdf' to requirements.txt and rebuild the image.")
 
-    # ③ DB pool (unchanged)
+    # ③ DB pool
     try:
-        from core.db import init_pool, SEED_ORG_ID, get_pool
+        from core.db import init_pool
         await init_pool()
-
-        # Start rules sync background loop now that DB pool is ready
-        from core.rules_sync import start_sync_loop
-        org_id = os.getenv("DEFAULT_ORG_ID") or SEED_ORG_ID
-        asyncio.create_task(
-            start_sync_loop(str(org_id))
-        )
+        print("✅ DB pool ready")
     except Exception as exc:
         print(f"⚠️  DB pool failed to initialise: {exc}")
         print("   Approval/shipment persistence will be unavailable this session.")
 
-    # ④ Knowledge base seed (unchanged)
+    # ④ Knowledge base seed
     try:
         from core.db import get_pool, SEED_ORG_ID
         from core.knowledge_base import KnowledgeBase
@@ -284,11 +276,24 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Knowledge base seed failed: {exc}")
         print("   FAQ/RAG answers will fall back to hardcoded replies.")
 
+    # ⑤ Rules sync background loop
+    # Runs every RULES_SYNC_INTERVAL_H hours (default 6).
+    # Pulls versioned HS and compliance bundle from TradeOS cloud.
+    # Non-fatal — if cloud is unreachable, local rules stay active.
+    try:
+        from core.rules_sync import start_sync_loop
+        org_id = os.getenv("DEFAULT_ORG_ID", "")
+        if org_id:
+            asyncio.create_task(start_sync_loop(org_id))
+            print("✅ Rules sync loop started")
+        else:
+            print("⚠️  DEFAULT_ORG_ID not set — rules sync skipped")
+    except Exception as exc:
+        print(f"⚠️  Rules sync failed to start (non-fatal): {exc}")
 
     yield
 
     # ── Shutdown ───────────────────────────────────────────
-    # Close Redis first (flush any pending pub/sub)
     try:
         from core.redis_client import close_redis
         await close_redis()
