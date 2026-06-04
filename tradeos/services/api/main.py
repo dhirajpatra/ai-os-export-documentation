@@ -263,6 +263,13 @@ async def lifespan(app: FastAPI):
     try:
         from core.db import init_pool, SEED_ORG_ID, get_pool
         await init_pool()
+
+        # Start rules sync background loop now that DB pool is ready
+        from core.rules_sync import start_sync_loop
+        org_id = os.getenv("DEFAULT_ORG_ID") or SEED_ORG_ID
+        asyncio.create_task(
+            start_sync_loop(str(org_id))
+        )
     except Exception as exc:
         print(f"⚠️  DB pool failed to initialise: {exc}")
         print("   Approval/shipment persistence will be unavailable this session.")

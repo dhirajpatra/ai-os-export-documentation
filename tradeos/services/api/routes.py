@@ -1753,3 +1753,30 @@ async def get_learned_templates(
     from services.agents.template_matcher import list_templates
     templates = await list_templates(str(ctx.org_id))
     return {"templates": templates, "count": len(templates)}
+
+
+@router.post("/api/v1/mcp/keys/generate")
+async def generate_mcp_key(ctx: OrgContext = Depends(get_org_context)):
+    """Owner-only. Generates a live MCP API key for the org."""
+    if ctx.role not in ("owner", "admin"):
+        raise HTTPException(403, "Only org owner or admin can generate MCP keys")
+
+    import secrets, hashlib
+    raw_key    = "tos_live_" + secrets.token_urlsafe(32)
+    key_hash   = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:16]
+
+    async with get_pool().acquire() as db:
+        await db.execute(
+            """
+            INSERT INTO mcp_api_keys (org_id, key_hash, key_prefix)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id, environment)
+            DO UPDATE SET key_hash=$2, key_prefix=$3, is_active=TRUE, last_used_at=NULL
+            """,
+            ctx.org_id, key_hash, key_prefix,
+        )
+
+    # Return raw key ONCE — never stored, never retrievable again
+    return {"api_key": raw_key, "prefix": key_prefix,
+            "note": "Store this key securely. It will not be shown again."}
