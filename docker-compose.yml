@@ -1,6 +1,6 @@
 # ============================================================
-# TradeOS — Docker Compose
-# Full stack: API + DB + Redis + Kafka + Temporal + PaddleOCR
+# TradeOS + OpenClaw — Complete Multi-Agent Stack
+# Full stack: API + OpenClaw + DB + Redis + Temporal + Ollama + OCR
 # ============================================================
 
 services:
@@ -18,20 +18,69 @@ services:
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradeos}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-tradeos}
     volumes:
       - ./tradeos:/app
     depends_on:
-      # postgres:
-      #   condition: service_healthy
-      # redis:
-      #   condition: service_healthy
-      # kafka:
-      #   condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
       ollama:
         condition: service_started
     restart: unless-stopped
     networks:
       - tradeos
+
+  # ── OpenClaw Multi-Agent Gateway ──────────────────────────
+  openclaw:
+    image: openclaw/openclaw:latest
+    container_name: openclaw
+    ports:
+      - "127.0.0.1:18789:18789"  # Bind to localhost only for security
+    environment:
+      # Core settings
+      - NODE_ENV=production
+      - OPENCLAW_PORT=18789
+      - OPENCLAW_BIND=lan
+      - OPENCLAW_CONTROL_UI_ENABLED=true
+      
+      # Database connections (shared with TradeOS)
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradeos}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-tradeos}
+      - REDIS_URL=redis://redis:6379
+      
+      # Ollama connection
+      - OLLAMA_BASE_URL=http://ollama:11434
+      
+      # Security - generate with: openssl rand -hex 32
+      - OPENCLAW_AUTH_TOKEN=${OPENCLAW_AUTH_TOKEN:-change_this_token_in_production}
+      
+      # Agent configuration
+      - OPENCLAW_DEFAULT_MODEL=ollama/${OLLAMA_MODEL:-qwen2.5:3b}
+      
+      # Optional: Enable agent-to-agent communication
+      - OPENCLAW_AGENT_TO_AGENT_ENABLED=${OPENCLAW_AGENT_TO_AGENT_ENABLED:-true}
+    volumes:
+      - openclaw_workspace:/root/.openclaw/workspace
+      - openclaw_config:/root/.openclaw/config
+      - openclaw_logs:/root/.openclaw/logs
+      - openclaw_memory:/root/.openclaw/memory
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - tradeos
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
 
   # ── PostgreSQL + pgvector ─────────────────────────────────
   postgres:
@@ -47,14 +96,14 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U tradeos" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeos}" ]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
       - tradeos
 
-  # ── Redis (hot cache + rate limiting) ────────────────────
+  # ── Redis (hot cache + rate limiting + OpenClaw queue) ────
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -70,45 +119,6 @@ services:
     networks:
       - tradeos
 
-  # ── Kafka (event bus) ─────────────────────────────────────
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
-    container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    networks:
-      - tradeos
-
-  kafka:
-    image: confluentinc/cp-kafka:7.5.0
-    container_name: kafka
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    depends_on:
-      - zookeeper
-    networks:
-      - tradeos
-
-  # ── Kafka UI (visualize messages in browser) ──────────────
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - "8085:8080"
-    environment:
-      KAFKA_CLUSTERS_0_NAME: tradeos-kafka
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
-      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
-    depends_on:
-      - kafka
-    networks:
-      - tradeos
-
   # ── Temporal (durable workflow execution) ─────────────────
   temporal:
     image: temporalio/auto-setup:1.22
@@ -120,7 +130,7 @@ services:
       - DB_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER:-tradeos}
       - POSTGRES_PWD=${POSTGRES_PASSWORD:-tradeos}
-      - POSTGRES_SEEDS=${POSTGRES_SEEDS:-postgres}
+      - POSTGRES_SEEDS=postgres
     depends_on:
       postgres:
         condition: service_healthy
@@ -153,7 +163,7 @@ services:
     networks:
       - tradeos
 
-  # ── Local LLM — Primary Provider (Ollama + qwen2.5:3b) ──────
+  # ── Local LLM — Primary Provider (Ollama) ─────────────────
   ollama:
     image: ollama/ollama:0.3.12
     container_name: ollama
@@ -170,28 +180,23 @@ services:
               capabilities: [ gpu ]
     networks:
       - tradeos
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # ── WhatsApp Webhook Proxy (ngrok in dev) ─────────────────
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: ngrok
-    command: http api:8000 --domain=${NGROK_DOMAIN}
-    environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    ports:
-      - "4040:4040"
-    depends_on:
-      - api
-    profiles:
-      - dev
-    networks:
-      - tradeos
-
+# ── Volumes ─────────────────────────────────────────────────
 volumes:
   pgdata:
   redisdata:
   ollamadata:
+  openclaw_workspace:
+  openclaw_config:
+  openclaw_logs:
+  openclaw_memory:
 
+# ── Networks ───────────────────────────────────────────────
 networks:
   tradeos:
     driver: bridge

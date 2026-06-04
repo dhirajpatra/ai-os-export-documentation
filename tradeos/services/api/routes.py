@@ -153,10 +153,21 @@ async def run_killer_demo(
         raw_input=raw_input,
     )
 
-    async def ws_hook(event: dict):
-        pass
+    # Push WorkflowEngine step events to the SSE bus so the frontend
+    # progress panel gets live updates — same as KillerDemoWorkflow does.
+    from services.sse.sse_bus import push_event as _push_event
+    async def sse_hook(event: dict):
+        try:
+            await _push_event(
+                wf_ctx.workflow_id,
+                event.get("event", "step"),
+                event.get("data", {}).get("step", ""),
+                event.get("data", {}),
+            )
+        except Exception:
+            pass   # SSE failure must never block the workflow response
 
-    engine.on_event(ws_hook)
+    engine.on_event(sse_hook)
 
     try:
         result = await engine.run()
@@ -1710,20 +1721,6 @@ async def list_shipments(
         )
 
 
-@router.get("/api/v1/stream/kafka")
-async def stream_kafka_events():
-    """SSE endpoint to stream Kafka messages to the browser for debugging."""
-    async def event_generator():
-        yield "data: {\"status\": \"Kafka integration is disabled\"}\n\n"
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-"""
-Paste this into services/api/routes.py — one new endpoint.
-
-Add this import near the top of routes.py:
-    from services.agents.template_matcher import list_templates
-"""
-
 @router.get("/api/v1/templates")
 async def get_learned_templates(
     ctx: OrgContext = Depends(get_org_context),
@@ -1756,3 +1753,30 @@ async def get_learned_templates(
     from services.agents.template_matcher import list_templates
     templates = await list_templates(str(ctx.org_id))
     return {"templates": templates, "count": len(templates)}
+
+
+@router.post("/api/v1/mcp/keys/generate")
+async def generate_mcp_key(ctx: OrgContext = Depends(get_org_context)):
+    """Owner-only. Generates a live MCP API key for the org."""
+    if ctx.role not in ("owner", "admin"):
+        raise HTTPException(403, "Only org owner or admin can generate MCP keys")
+
+    import secrets, hashlib
+    raw_key    = "tos_live_" + secrets.token_urlsafe(32)
+    key_hash   = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:16]
+
+    async with get_pool().acquire() as db:
+        await db.execute(
+            """
+            INSERT INTO mcp_api_keys (org_id, key_hash, key_prefix)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (org_id, environment)
+            DO UPDATE SET key_hash=$2, key_prefix=$3, is_active=TRUE, last_used_at=NULL
+            """,
+            ctx.org_id, key_hash, key_prefix,
+        )
+
+    # Return raw key ONCE — never stored, never retrievable again
+    return {"api_key": raw_key, "prefix": key_prefix,
+            "note": "Store this key securely. It will not be shown again."}

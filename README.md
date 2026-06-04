@@ -98,7 +98,7 @@ One documentation executive in a export or freight forwarding company using Trad
 | **Deterministic workflow engine** | LLMs are tools called within steps — not orchestrators. |
 | **Memory-first** | Agents learn and improve with every transaction. This is the moat. |
 | **HITL by design** | Safe autonomy, not full autonomy. Enterprise trust requires human checkpoints. |
-| **Event-driven** | Every action emits events. Kafka powers async, auditable, replay-able operations. |
+| **Event-driven** | Every action emits events. SSE and WebSockets power async, auditable operations. |
 | **Multi-tenant** | Row-level security. Every query is scoped to org_id. |
 
 ---
@@ -124,7 +124,7 @@ tradeos/
 ├── 001_core_schema.sql          ← Full PostgreSQL schema (multi-tenant, audit-ready)
 │
 ├── config/                      ← Environment configs per deployment
-├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Kafka, Temporal, OCR
+├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Temporal, OCR
 └── requirements.txt
 ```
 
@@ -190,6 +190,189 @@ curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
 ```
 
 ---
+
+📁 Create .env File
+Create a .env file in the same directory as your docker-compose.yml:
+
+env
+# Database
+POSTGRES_USER=tradeos
+POSTGRES_PASSWORD=your_secure_password_here
+POSTGRES_DB=tradeos
+POSTGRES_HOST_PORT=5433
+
+# Redis
+REDIS_HOST_PORT=6380
+
+# Ollama
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL=qwen2.5:3b
+
+# OpenClaw Security (generate with: openssl rand -hex 32)
+OPENCLAW_AUTH_TOKEN=your_generated_64_char_hex_token_here
+OPENCLAW_AGENT_TO_AGENT_ENABLED=true
+
+# Optional: Cloud API keys for hybrid models
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+🚀 Deployment Steps
+Step 1: Generate OpenClaw Auth Token
+powershell
+# Generate a secure token
+openssl rand -hex 32
+# Or use PowerShell
+-join ((48..57) + (65..90) + (97..122) | Get-Random -Count 64 | ForEach-Object {[char]$_})
+Step 2: Pull Required Models into Ollama
+powershell
+# Start Ollama first
+docker-compose up -d ollama
+
+# Wait for Ollama to initialize
+Start-Sleep -Seconds 10
+
+# Pull your model (same as configured in .env)
+docker exec -it ollama ollama pull qwen2.5:3b
+
+# Optional: Pull embedding model for vector search
+docker exec -it ollama ollama pull nomic-embed-text
+
+# Verify
+docker exec -it ollama ollama list
+Step 3: Initialize PostgreSQL Extensions
+powershell
+# Start postgres and create pgvector extension
+docker-compose up -d postgres
+
+# Wait for postgres to be healthy
+Start-Sleep -Seconds 5
+
+# Create vector extension (for OpenClaw memory)
+docker exec -it postgres psql -U tradeos -d tradeos -c "CREATE EXTENSION IF NOT EXISTS vector;"
+Step 4: Start Full Stack
+powershell
+# Start all services
+docker-compose up -d
+
+# Monitor logs
+docker-compose logs -f
+
+# Check all services are running
+docker-compose ps
+Expected output:
+
+text
+NAME            STATUS          PORTS
+api             running         0.0.0.0:8000->8000/tcp
+openclaw        running         127.0.0.1:18789->18789/tcp
+postgres        healthy         0.0.0.0:5433->5432/tcp
+redis           healthy         0.0.0.0:6380->6379/tcp
+temporal        running         0.0.0.0:7233->7233/tcp
+temporal-ui     running         0.0.0.0:8088->8080/tcp
+ocr             running         0.0.0.0:8100->8100/tcp
+ollama          running         0.0.0.0:11434->11434/tcp
+Step 5: Configure OpenClaw
+powershell
+# Enter OpenClaw container
+docker exec -it openclaw bash
+
+# Configure Ollama provider
+openclaw config set models.providers.ollama.baseUrl "http://ollama:11434"
+openclaw config set models.providers.ollama.apiKey "ollama-local"
+
+# Set default model
+openclaw config set agents.defaults.model.primary "ollama/qwen2.5:3b"
+
+# Enable agent-to-agent communication
+openclaw config set tools.agentToAgent.enabled true
+
+# List available models
+openclaw models list
+
+# Exit
+exit
+Step 6: Access Services
+Service	URL	Purpose
+TradeOS API	http://localhost:8000	Your FastAPI backend
+OpenClaw Dashboard	http://localhost:18789	Multi-agent control UI
+Temporal UI	http://localhost:8088	Workflow monitoring
+Ollama API	http://localhost:11434	Local LLM endpoint
+🎯 Create Custom Agents for TradeOS
+powershell
+# Create specialized agents that can interact with TradeOS APIs
+docker exec -it openclaw openclaw agents add trading_analyst \
+  --workspace /root/.openclaw/workspace/trading \
+  --description "Analyzes market data from TradeOS API"
+
+docker exec -it openclaw openclaw agents add document_processor \
+  --workspace /root/.openclaw/workspace/docs \
+  --description "Processes documents using PaddleOCR"
+
+docker exec -it openclaw openclaw agents add workflow_orchestrator \
+  --workspace /root/.openclaw/workspace/workflows \
+  --description "Orchestrates multi-step trading workflows"
+🔗 Integrating OpenClaw with TradeOS API
+Create an OpenClaw tool definition to call your TradeOS API:
+
+json
+{
+  "tools": {
+    "custom": [
+      {
+        "name": "tradeos_query",
+        "description": "Query TradeOS API for trading data",
+        "url": "http://api:8000/api/query",
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      }
+    ]
+  }
+}
+📊 Management Commands
+Action	Command
+Start all	docker-compose up -d
+Stop all	docker-compose down
+Restart OpenClaw only	docker-compose restart openclaw
+View OpenClaw logs	docker-compose logs -f openclaw
+View all logs	docker-compose logs -f
+List agents	docker exec -it openclaw openclaw agents list
+Test Ollama	docker exec -it ollama ollama run qwen2.5:3b "Hello"
+Rebuild API after changes	docker-compose up -d --build api
+Full cleanup (deletes all data)	docker-compose down -v
+✅ Verification Checklist
+powershell
+# 1. Check all containers running
+docker-compose ps --format "table {{.Name}}\t{{.Status}}"
+
+# 2. Test Ollama
+curl http://localhost:11434/api/generate -d '{"model":"qwen2.5:3b","prompt":"Hello"}'
+
+# 3. Test PostgreSQL + pgvector
+docker exec -it postgres psql -U tradeos -d tradeos -c "SELECT extname FROM pg_extension WHERE extname='vector';"
+
+# 4. Test Redis
+docker exec -it redis redis-cli ping
+
+# 5. Test OpenClaw
+docker exec -it openclaw openclaw doctor
+
+# 6. Test TradeOS API
+curl http://localhost:8000/health
+
+🐛 Troubleshooting
+
+Issue	Solution
+
+OpenClaw can't connect to Ollama	Ensure OLLAMA_BASE_URL=http://ollama:11434 (not localhost)
+
+pgvector extension missing	Run docker exec -it postgres psql -U tradeos -c "CREATE EXTENSION vector;"
+
+Port conflicts	Change host ports in .env file
+OpenClaw auth required	Visit http://localhost:18789/setup to approve device
+GPU not detected	Run docker exec -it ollama nvidia-smi to verify
+Memory issues	Pull smaller model or add memory limits to docker-compose
+Your TradeOS backend now shares PostgreSQL, Redis, and Ollama with OpenClaw's multi-agent system. Agents can access your API via the internal Docker network using http://api:8000, and all data (including vector embeddings for agent memory) lives in the same PostgreSQL database.
 
 ## Quick Start
 
@@ -268,14 +451,6 @@ docker compose --profile dev up ngrok
 # ngrok http 8000 --url=preindulgent-madonna-reliably.ngrok-free.dev
 ```
 
-### To Monitor Kafka Streams
-```bash
-docker exec -it api kafka-console-consumer \
-  --bootstrap-server kafka:9092 \
-  --topic workflow_events \
-  --from-beginning
-```
----
 
 ## Key API Endpoints
 
@@ -442,7 +617,7 @@ Dashboard shows:
 | API | FastAPI + uvicorn (async) |
 | DB | PostgreSQL 16 + pgvector |
 | Cache | Redis |
-| Events | Kafka |
+| Events | SSE / WebSockets |
 | Workflow | Temporal (durable execution) |
 | OCR | PaddleOCR + Azure Document Intelligence |
 | LLMs | OpenAI → Anthropic → Gemini → Ollama |
@@ -451,6 +626,73 @@ Dashboard shows:
 | Storage | S3 / GCS |
 | Frontend | Next.js + React (separate repo) |
 | Observability | OpenTelemetry + Prometheus |
+
+Searched for "guardrail"
+Listed directory AI-OS-Export-Documentation
+Listed directory tradeos
+Listed directory agents
+Listed directory core
+Viewed po_extraction.py:1-268
+Viewed .env:1-99
+Viewed requirements.txt:1-79
+Viewed hs_validation.py:1-102
+Searched for "confidence"
+Viewed workflow_engine.py:199-998
+Searched for "HITLOrchestrator"
+Viewed main.py:1-428
+Listed directory api
+Searched for "guard"
+Searched for "validate"
+Searched for "guardrail"
+Searched for "compliance"
+Viewed README.md:1-428
+
+Yes! While the codebase does not use third-party libraries like `guardrails-ai` or NVIDIA’s `NeMo Guardrails` (none are listed in `requirements.txt`), **TradeOS is built from the ground up with structural, regulatory, and operational guardrails**.
+
+Here are the key guardrails implemented in the system:
+
+---
+
+### 1. Human-In-The-Loop (HITL) & Confidence Guardrails
+The core design principle of TradeOS is **"AI operates workflows, humans supervise."** 
+* **`HITLOrchestrator` (`tradeos/services/api/main.py`)**: A deterministic decision engine that evaluates every critical step using confidence scores and risk flags:
+  * **Auto-Approve**: Only triggered if the overall confidence is above the auto threshold ($\ge 60\%$ or $\ge 92\%$ depending on configuration) **and** there are no high-severity or critical flags.
+  * **Soft/Optional Review**: Triggered for moderate confidence scores to allow quick, optional human inspection.
+  * **Hard Block / Mandatory Review**: Triggered if the confidence falls below the human threshold ($< 45\%$) or if there are any high-severity risk flags.
+  * **Absolute Block**: Triggered instantly if **any critical compliance flag** is raised, completely stopping automatic downstream execution (e.g., carrier bookings or buyer notification).
+
+---
+
+### 2. Regulatory & Compliance Guardrail
+* **`HSCodeValidationAgent` (`tradeos/services/agents/hs_validation.py`)**: Validates extracted HS codes against the WCO schedule, India ITC-HS, and UAE GCC tariffs.
+  * Checks export policies (e.g., *Restricted, Prohibited, Canalized, STE*).
+  * Automatically flags restricted routes or prohibited goods, raising **critical severity flags** that block automatic workflow continuation.
+
+---
+
+### 3. LLM Reliability & Fallback Guardrails
+* **LLM Provider Chain (`core/config.py`)**: Protects the system against LLM downtime, rate-limits, or API outages by maintaining a prioritized list of providers (OpenAI $\rightarrow$ Groq $\rightarrow$ xAI $\rightarrow$ Anthropic $\rightarrow$ Gemini $\rightarrow$ Local Ollama). If a higher priority model fails, the system automatically cascades down to ensure execution continuity.
+* **Deterministic Workflow Engine (`tradeos/core/workflow_engine.py`)**: Runs LLMs only as functional tools inside deterministic steps rather than allowing LLMs to orchestrate the workflow itself, ensuring predictable outputs.
+
+---
+
+### 4. Security & Data Isolation Guardrails
+* **Multi-Tenant Scoping**: Every database query, state transition, and API endpoint is strictly partitioned by `org_id`.
+* **RBAC & Session Validation (`tradeos/core/rbac.py`)**: Validates JWTs, session expiration, and user activation states strictly before resolving organization context via the `get_org_context` dependency.
+
+---
+
+### 5. Cost & Hallucination Guardrails
+* **Three-Layer PO Extraction (`tradeos/services/agents/po_extraction.py`)**: 
+  * **Layer 1** uses high-precision local regex/rules (`RuleBasedExtractor`).
+  * **Layer 2** uses buyer layouts matched from Redis (`TemplateMatcher`).
+  * Only when both layers fail to meet the confidence threshold does the system fall back to **Layer 3 (LLM)**. This acts as a robust cost and hallucination guardrail.
+
+---
+
+### Summary of Work Done
+* Scanned the workspace directories and checked files for any external guardrail package integrations.
+* Analyzed `po_extraction.py`, `hs_validation.py`, `workflow_engine.py`, `main.py`, and `README.md` to map out the system's operational and architectural guardrails.
 
 ---
 

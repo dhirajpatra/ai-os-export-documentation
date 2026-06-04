@@ -136,15 +136,6 @@ class KillerDemoWorkflow:
             "ts":     datetime.utcnow().isoformat(),
             "data":   data or {},
         }
-        try:
-            from core.kafka_producer import send_event
-            await send_event("workflow_events", f"workflow.{step}.{status}", {
-                "workflow_id": state.get("workflow_id"),
-                "org_id":      str(self.org_id),
-                **entry,
-            })
-        except Exception as exc:
-            print(f"[Kafka] log failed: {exc}")
         return [entry]
 
     # ── Nodes ─────────────────────────────────────────────
@@ -163,9 +154,26 @@ class KillerDemoWorkflow:
             )
             raw_text = doc_intel["raw_text"]
 
+        # Load per-org extraction rules — mirrors what WorkflowEngine.step_extract_po does
+        # so both execution paths produce consistent results
+        org_rules: dict = {}
+        try:
+            from core.db import get_pool
+            _pool = get_pool()
+            async with _pool.acquire() as _db:
+                row = await _db.fetchrow(
+                    "SELECT extraction_rules FROM organizations WHERE id = $1",
+                    self.org_id,
+                )
+                if row and row["extraction_rules"]:
+                    org_rules = dict(row["extraction_rules"])
+        except Exception as _exc:
+            print(f"[node_po_extraction] org_rules load failed (non-fatal): {_exc}")
+
         extraction = await agent.run({
-            "source":   state["source"],
-            "raw_text": raw_text or "",
+            "source":     state["source"],
+            "raw_text":   raw_text or "",
+            "_org_rules": org_rules,
         })
         extracted = extraction["data"]
 
