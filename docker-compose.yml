@@ -16,7 +16,7 @@ services:
     env_file:
       - ./tradeos/.env
     environment:
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://${POSTGRES_USER:-tradeos}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-tradeos}
@@ -27,60 +27,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_started
     restart: unless-stopped
     networks:
       - tradeos
 
-  # ── OpenClaw Multi-Agent Gateway ──────────────────────────
-  openclaw:
-    image: openclaw/openclaw:latest
-    container_name: openclaw
+  # ── Frontend Web App ──────────────────────────────────────
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: frontend
     ports:
-      - "127.0.0.1:18789:18789"  # Bind to localhost only for security
-    environment:
-      # Core settings
-      - NODE_ENV=production
-      - OPENCLAW_PORT=18789
-      - OPENCLAW_BIND=lan
-      - OPENCLAW_CONTROL_UI_ENABLED=true
-      
-      # Database connections (shared with TradeOS)
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradeos}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-tradeos}
-      - REDIS_URL=redis://redis:6379
-      
-      # Ollama connection
-      - OLLAMA_BASE_URL=http://ollama:11434
-      
-      # Security - generate with: openssl rand -hex 32
-      - OPENCLAW_AUTH_TOKEN=${OPENCLAW_AUTH_TOKEN:-change_this_token_in_production}
-      
-      # Agent configuration
-      - OPENCLAW_DEFAULT_MODEL=ollama/${OLLAMA_MODEL:-qwen2.5:3b}
-      
-      # Optional: Enable agent-to-agent communication
-      - OPENCLAW_AGENT_TO_AGENT_ENABLED=${OPENCLAW_AGENT_TO_AGENT_ENABLED:-true}
+      - "3000:3000"
     volumes:
-      - openclaw_workspace:/root/.openclaw/workspace
-      - openclaw_config:/root/.openclaw/config
-      - openclaw_logs:/root/.openclaw/logs
-      - openclaw_memory:/root/.openclaw/memory
+      - ../frontend:/app
+      - /app/node_modules
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      ollama:
-        condition: service_started
+      - api
     restart: unless-stopped
     networks:
       - tradeos
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - NET_RAW
-      - NET_ADMIN
 
   # ── PostgreSQL + pgvector ─────────────────────────────────
   postgres:
@@ -94,7 +60,7 @@ services:
       - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql:ro
+      - ./tradeos/001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql:ro
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeos}" ]
       interval: 5s
@@ -119,35 +85,6 @@ services:
     networks:
       - tradeos
 
-  # ── Temporal (durable workflow execution) ─────────────────
-  temporal:
-    image: temporalio/auto-setup:1.22
-    container_name: temporal
-    ports:
-      - "7233:7233"
-    environment:
-      - DB=postgresql
-      - DB_PORT=5432
-      - POSTGRES_USER=${POSTGRES_USER:-tradeos}
-      - POSTGRES_PWD=${POSTGRES_PASSWORD:-tradeos}
-      - POSTGRES_SEEDS=postgres
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - tradeos
-
-  temporal-ui:
-    image: temporalio/ui:2.21
-    container_name: temporal-ui
-    ports:
-      - "8088:8080"
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-    networks:
-      - tradeos
 
   # ── PaddleOCR Service ─────────────────────────────────────
   ocr:
@@ -163,34 +100,10 @@ services:
     networks:
       - tradeos
 
-  # ── Local LLM — Primary Provider (Ollama) ─────────────────
-  ollama:
-    image: ollama/ollama:0.3.12
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollamadata:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
-    networks:
-      - tradeos
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
 # ── Volumes ─────────────────────────────────────────────────
 volumes:
   pgdata:
   redisdata:
-  ollamadata:
   openclaw_workspace:
   openclaw_config:
   openclaw_logs:
