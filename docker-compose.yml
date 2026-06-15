@@ -39,7 +39,7 @@ services:
       dockerfile: Dockerfile
     container_name: frontend
     ports:
-      - "3000:80"   # Nginx inside the container listens on 80
+      - "3000:80" # Nginx inside the container listens on 80
     depends_on:
       - api
     restart: unless-stopped
@@ -58,7 +58,12 @@ services:
       - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./tradeos/001_core_schema.sql:/docker-entrypoint-initdb.d/001_core_schema.sql:ro
+      # ── One-time Neon backup restore (runs only on fresh volume) ──────────
+      # The shell script strips Neon-proprietary commands and replaces the
+      # neondb_owner role with ${POSTGRES_USER} before piping into psql.
+      # Named 001_ so it runs before any other init scripts.
+      - ./tradeos/restore_neon_backup.sh:/docker-entrypoint-initdb.d/001_restore_neon_backup.sh:ro
+      - ./neon_backup.sql:/docker-entrypoint-initdb.d/neon_backup.sql:ro
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeos}" ]
       interval: 5s
@@ -104,7 +109,7 @@ volumes:
   openclaw_logs:
   openclaw_memory:
 
-# ── Networks ───────────────────────────────────────────────
+    # ── Networks ───────────────────────────────────────────────
 networks:
   tradeos:
     driver: bridge
