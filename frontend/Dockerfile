@@ -1,62 +1,43 @@
 # ============================================================
-# TradeOS Frontend — Multi-Stage Docker Build
-# Stage 1: Node.js builder (installs deps + builds Next.js)
-# Stage 2: Nginx production server (serves static export)
+# TradeOS Frontend — Vite + React
+# Stage 1: Node.js builder  → vite build → dist/
+# Stage 2: Nginx            → serves dist/ as static files
 # ============================================================
 
 # ── Stage 1: Builder ────────────────────────────────────────
 FROM node:20-alpine AS builder
 
-# Install libc compatibility shims needed by some native modules
-RUN apk add --no-cache libc6-compat
-
 WORKDIR /app
 
-# Copy dependency manifests first (layer-cache optimization)
-COPY package.json package-lock.json* yarn.lock* pnpm-lock.yaml* ./
+# Copy dependency manifests first (layer-cache optimisation)
+COPY package.json package-lock.json* ./
 
-# Install dependencies using the correct package manager
-RUN \
-  if [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
-  elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile; \
-  else npm ci; \
-  fi
+# Install dependencies
+RUN npm ci
 
-# Copy the rest of the source code
+# Copy the rest of the source
 COPY . .
 
-# ── Build-time environment variables ──────────────────────
-# These are baked into the Next.js bundle at build time.
-# Override at build time with: --build-arg NEXT_PUBLIC_API_URL=...
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000
-ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+# Build-time env var — baked into the JS bundle by Vite
+ARG VITE_API_URL=http://localhost:8000
+ENV VITE_API_URL=${VITE_API_URL}
 
-ARG NODE_ENV=production
-ENV NODE_ENV=${NODE_ENV}
-
-# Build the Next.js app
-# If you use `next export` (static HTML), add: && npm run export
+# Produce the production build → /app/dist
 RUN npm run build
 
-# ── Stage 2: Production Nginx Server ────────────────────────
+# ── Stage 2: Nginx ──────────────────────────────────────────
 FROM nginx:1.27-alpine AS runner
 
-# Remove default nginx config
+# Remove the default nginx site config
 RUN rm /etc/nginx/conf.d/default.conf
 
-# Copy custom nginx config
+# Bring in our custom config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# ── For Next.js with standalone output mode ──────────────────
-# If next.config.js sets output: 'standalone', use this block instead
-# and switch to a Node runtime (see alternative Dockerfile below).
+# Copy the Vite build output into Nginx's web root
+COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Copy built static assets from builder
-# Adjust path if your Next.js outputs to a different directory
-COPY --from=builder /app/.next/static /usr/share/nginx/html/_next/static
-COPY --from=builder /app/public        /usr/share/nginx/html
-
-# ── Health check ─────────────────────────────────────────────
+# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:80/ || exit 1
 
