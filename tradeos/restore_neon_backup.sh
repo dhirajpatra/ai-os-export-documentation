@@ -1,35 +1,46 @@
 #!/bin/bash
 # =============================================================
 # restore_neon_backup.sh
-# Mounted in docker-entrypoint-initdb.d/ — runs ONCE on fresh
-# volume initialisation (after 001_core_schema.sql is skipped
-# when this file is listed first, or after it runs).
+# Mounted in docker-entrypoint-initdb.d/ — runs ONCE on a fresh
+# (empty) pgdata volume.
 #
-# What it does:
-#   1. Reads /docker-entrypoint-initdb.d/neon_backup.sql
-#   2. Strips Neon-proprietary commands (\restrict, \unrestrict,
-#      DROP DATABASE, CREATE DATABASE, ALTER DATABASE, \connect)
-#   3. Replaces owner "neondb_owner" → "${POSTGRES_USER}"
-#   4. Restores the cleaned SQL into the already-created DB
+# The POSTGRES_USER and POSTGRES_DB in .env already match the
+# Neon backup (neondb_owner / neondb), so Docker creates the DB
+# with the correct owner. We only need to:
+#   1. Strip Neon-proprietary meta-commands (\restrict, \unrestrict,
+#      DROP DATABASE, CREATE DATABASE, ALTER DATABASE <name>, \connect)
+#   2. Strip references to Neon-internal roles (neon_superuser,
+#      neon_superuser_read_only, etc.)
+#   3. Pipe the cleaned SQL into psql.
 # =============================================================
 
 set -euo pipefail
 
-DB="${POSTGRES_DB:-tradeos}"
-USER="${POSTGRES_USER:-tradeos}"
-BACKUP="/docker-entrypoint-initdb.d/neon_backup.sql"
+DB="${POSTGRES_DB:-neondb}"
+PG_USER="${POSTGRES_USER:-neondb_owner}"
+BACKUP="/docker-restore/neon_backup.sql"
 
-echo "==> [restore_neon_backup] Starting Neon backup restore into DB='${DB}' as USER='${USER}'"
+echo "==> [restore_neon_backup] DB='${DB}'  USER='${PG_USER}'"
 
 if [ ! -f "${BACKUP}" ]; then
-  echo "==> [restore_neon_backup] WARNING: ${BACKUP} not found — skipping restore."
+  echo "==> [restore_neon_backup] WARNING: ${BACKUP} not found — skipping."
   exit 0
 fi
 
-# Strip Neon-specific lines and replace owner, then pipe into psql
-grep -v '\\restrict\|\\unrestrict\|^DROP DATABASE\|^CREATE DATABASE\|^ALTER DATABASE\|^\\connect' "${BACKUP}" \
-  | sed "s/neondb_owner/${USER}/g" \
-  | sed "s/OWNER TO ${USER}/OWNER TO ${USER}/g" \
-  | psql --username="${USER}" --dbname="${DB}" \
+echo "==> [restore_neon_backup] Restoring backup (stripping Neon-only lines)..."
+
+# Lines stripped:
+#   \restrict / \unrestrict  — Neon connection restriction tokens
+#   DROP DATABASE            — would fail (can't drop connected DB)
+#   CREATE DATABASE          — DB already created by Docker entrypoint
+#   ALTER DATABASE neondb    — Neon-only DB-level changes
+#   \connect                 — already on the right DB
+#   GRANT ... TO neon_superuser / neon_superuser_read_only — Neon-internal roles
+grep -Ev \
+  '^\s*\\(restrict|unrestrict)[[:space:]]|^DROP DATABASE|^CREATE DATABASE|^ALTER DATABASE neondb|^\s*\\connect|TO neon_superuser' \
+  "${BACKUP}" \
+  | psql --username="${PG_USER}" --dbname="${DB}" \
   && echo "==> [restore_neon_backup] Restore completed successfully." \
-  || echo "==> [restore_neon_backup] Restore finished with warnings (check logs above)."
+  || echo "==> [restore_neon_backup] Restore finished (check any ERRORs above)."
+
+echo "==> [restore_neon_backup] Done."

@@ -18,9 +18,10 @@ services:
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      # Override cloud URLs from .env with local container service URLs
       - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-tradeos}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-tradeos}
-      - OCR_SERVICE_URL=${OCR_SERVICE_URL:-http://ocr:8100/extract}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-neondb_owner}:${POSTGRES_PASSWORD:-tradeos}@postgres:5432/${POSTGRES_DB:-neondb}
+      - OCR_SERVICE_URL=http://ocr:8100/extract
     volumes:
       - ./tradeos:/app
     depends_on:
@@ -63,9 +64,10 @@ services:
       # neondb_owner role with ${POSTGRES_USER} before piping into psql.
       # Named 001_ so it runs before any other init scripts.
       - ./tradeos/restore_neon_backup.sh:/docker-entrypoint-initdb.d/001_restore_neon_backup.sh:ro
-      - ./neon_backup.sql:/docker-entrypoint-initdb.d/neon_backup.sql:ro
+      # Mount backup outside initdb.d so Docker does NOT auto-run it as raw SQL
+      - ./neon_backup.sql:/docker-restore/neon_backup.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeos}" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradeos} -d ${POSTGRES_DB:-tradeos}" ]
       interval: 5s
       timeout: 5s
       retries: 10
