@@ -1,0 +1,28 @@
+{
+  "name": "tradeos-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "@react-oauth/google": "^0.13.5",
+    "framer-motion": "^12.40.0",
+    "lucide-react": "^1.16.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.15.1",
+    "recharts": "^3.8.1",
+    "sonner": "^2.0.7",
+    "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.2"
+  }
+}

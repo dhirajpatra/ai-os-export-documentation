@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-835J1CS85E"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-835J1CS85E');
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TradeOS — Agentic AI for Export</title>
+    <link rel="icon" type="image/jpeg" href="/logo.jpeg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <script>
+      // Immediately apply RTL if the language is set to Arabic via Google Translate cookie
+      if (document.cookie.includes('googtrans=/en/ar')) {
+        document.documentElement.dir = 'rtl';
+        document.documentElement.lang = 'ar';
+      }
+    </script>
+  </head>
+  <body>
+    <div id="google_translate_element" style="display: none;"></div>
+    <script type="text/javascript">
+      function googleTranslateElementInit() {
+        new google.translate.TranslateElement({
+          pageLanguage: 'en',
+          includedLanguages: 'en,ar',
+          autoDisplay: false
+        }, 'google_translate_element');
+      }
+    </script>
+    <script type="text/javascript" src="https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>
+    
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

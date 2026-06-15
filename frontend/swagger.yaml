@@ -1,0 +1,333 @@
+openapi: 3.0.0
+info:
+  title: TradeOS Backend API
+  description: API for the TradeOS Agentic AI Export Operating System. It manages agents, workflows, shipments, documents, compliance, and logistics.
+  version: 1.0.0
+servers:
+  - url: https://ai-os-export-documentation-production.up.railway.app/api/v1
+    description: Production API server
+
+paths:
+  /agents:
+    get:
+      summary: List all active AI agents
+      description: Retrieves a list of AI agents, their status, throughput, and skills.
+      tags:
+        - Agents
+      responses:
+        '200':
+          description: A list of agents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Agent'
+
+  /workflow/po-to-dispatch:
+    post:
+      summary: Trigger PO-to-Dispatch AI Workflow
+      description: Initiates the autonomous pipeline from purchase order extraction to dispatch.
+      tags:
+        - Workflow
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                po_text:
+                  type: string
+                  description: The raw text of the purchase order
+      responses:
+        '200':
+          description: Workflow triggered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  message:
+                    type: string
+
+  /workflows/{shipmentId}:
+    get:
+      summary: Get the current workflow status of a shipment
+      description: Retrieves the autonomous workflow execution nodes and their status for a given shipment.
+      tags:
+        - Workflow
+      parameters:
+        - name: shipmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow steps and status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+
+  /documents:
+    get:
+      summary: List all generated trade documents
+      description: Retrieves a list of generated documents across all shipments.
+      tags:
+        - Documents
+      responses:
+        '200':
+          description: A list of documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Document'
+    post:
+      summary: Request document generation
+      description: Triggers the Documentation Agent to generate a new document (e.g., Commercial Invoice).
+      tags:
+        - Documents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                shipmentId:
+                  type: string
+                documentType:
+                  type: string
+      responses:
+        '201':
+          description: Document generation initiated
+
+  /shipments:
+    get:
+      summary: List all shipments
+      description: Retrieves a list of all active shipments.
+      tags:
+        - Shipments
+      responses:
+        '200':
+          description: A list of shipments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Shipment'
+    post:
+      summary: Create a new shipment
+      description: Initializes a new export shipment and triggers PO Intake.
+      tags:
+        - Shipments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShipmentInput'
+      responses:
+        '201':
+          description: Shipment created successfully
+
+  /compliance/{shipmentId}:
+    get:
+      summary: Get compliance validation status
+      description: Retrieves the status of compliance checks (e.g., OFAC, DGFT) for a specific shipment.
+      tags:
+        - Compliance
+      parameters:
+        - name: shipmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Compliance validation results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ComplianceCheck'
+
+  /logistics/{shipmentId}:
+    get:
+      summary: Get logistics and tracking lifecycle
+      description: Retrieves the logistics steps and current location of the shipment.
+      tags:
+        - Logistics
+      parameters:
+        - name: shipmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Logistics tracking details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Logistics'
+
+  /approvals:
+    get:
+      summary: List pending human approvals
+      description: Retrieves workflows that are paused and waiting for human-in-the-loop (HITL) approval.
+      tags:
+        - Approvals
+      parameters:
+        - name: status_filter
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A list of pending approvals
+
+  /approvals/{id}/action:
+    post:
+      summary: Action a pending workflow approval
+      description: Approves or rejects a workflow paused for human validation.
+      tags:
+        - Approvals
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [approve, reject]
+                note:
+                  type: string
+      responses:
+        '200':
+          description: Action recorded successfully
+
+components:
+  schemas:
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [Active, Monitoring, Offline]
+        throughput:
+          type: string
+        skills:
+          type: array
+          items:
+            type: string
+            
+    Workflow:
+      type: object
+      properties:
+        shipmentId:
+          type: string
+        currentStep:
+          type: string
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              status:
+                type: string
+                enum: [completed, active, pending]
+              timestamp:
+                type: string
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        dateGenerated:
+          type: string
+          format: date-time
+          
+    Shipment:
+      type: object
+      properties:
+        id:
+          type: string
+        customerName:
+          type: string
+        destination:
+          type: string
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          
+    ShipmentInput:
+      type: object
+      properties:
+        customerName:
+          type: string
+        destination:
+          type: string
+        poDetails:
+          type: string
+          
+    ComplianceCheck:
+      type: object
+      properties:
+        checkName:
+          type: string
+        status:
+          type: string
+          enum: [Passed, Failed, Pending]
+        timestamp:
+          type: string
+          format: date-time
+
+    Logistics:
+      type: object
+      properties:
+        shipmentId:
+          type: string
+        currentStage:
+          type: string
+        stages:
+          type: array
+          items:
+            type: object
+            properties:
+              stageName:
+                type: string
+              status:
+                type: string

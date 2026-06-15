@@ -1,0 +1,635 @@
+:root {
+  --bg-dark: #0a0a0f;
+  --bg-card: rgba(20, 20, 30, 0.6);
+  --bg-sidebar: #0f0f16;
+  --text-main: #f8f8f2;
+  --text-muted: #8b8b9e;
+  --accent-primary: #00e5ff;
+  --accent-secondary: #00b0ff;
+  --success: #10b981;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--bg-dark);
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  overflow: hidden;
+  background-image: 
+    radial-gradient(circle at 15% 50%, rgba(0, 229, 255, 0.08), transparent 25%),
+    radial-gradient(circle at 85% 30%, rgba(0, 176, 255, 0.08), transparent 25%);
+}
+
+/* Typography */
+h1, h2, h3, h4 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, var(--text-main) 0%, var(--text-muted) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-accent-gradient {
+  background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-muted {
+  color: var(--text-muted);
+}
+
+.text-success {
+  color: var(--success);
+}
+
+/* Layout */
+.app-container {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: clamp(220px, 15vw + 80px, 280px);
+  background-color: var(--bg-sidebar);
+  border-right: var(--glass-border);
+  padding: clamp(1rem, 2vw, 1.5rem);
+  display: flex;
+  flex-direction: column;
+}
+
+.main-header {
+  height: clamp(50px, 8vh, 70px);
+  padding: 0 clamp(1rem, 3vw, 2rem);
+}
+
+.main-content {
+  flex: 1;
+  padding: clamp(1rem, 3vw, 2rem);
+  overflow-y: auto;
+}
+
+/* Components */
+.sidebar-link {
+  display: block;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.5rem;
+  border-radius: 0.75rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: all 0.3s ease;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.sidebar-link:hover, .sidebar-link.active {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-main);
+  border-color: var(--border-color);
+  transform: translateX(4px);
+}
+html[dir="rtl"] .sidebar-link:hover, 
+html[dir="rtl"] .sidebar-link.active {
+  transform: translateX(-4px);
+}
+
+.sidebar.collapsed .sidebar-link:hover, 
+.sidebar.collapsed .sidebar-link.active {
+  transform: scale(1.1); /* Don't shift sideways, just pop slightly */
+}
+
+/* Hide scrollbar completely in the sidebar nav */
+.sidebar-nav::-webkit-scrollbar {
+  display: none;
+}
+.sidebar-nav {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: var(--glass-border);
+  border-radius: 1rem;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 10px 40px -10px rgba(0,0,0,0.5);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 2rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: var(--glass-border);
+}
+
+/* Grids */
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1.5rem;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+}
+
+.grid-5 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+/* Progress Bar */
+.progress-bg {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 0.5rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+  border-radius: 3px;
+  transition: width 1s ease-in-out;
+}
+
+/* Utility */
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.flex-center {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* Responsive Table Wrappers */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 0.5rem;
+}
+
+.table-row-group {
+  min-width: 700px; /* Minimum width to prevent squashing on mobile */
+  display: flex;
+  flex-direction: column;
+}
+
+.mb-1 { margin-bottom: 0.25rem; }
+.mb-2 { margin-bottom: 0.5rem; }
+.mb-4 { margin-bottom: 1rem; }
+.mb-6 { margin-bottom: 1.5rem; }
+.mb-8 { margin-bottom: 2rem; }
+.mt-4 { margin-top: 1rem; }
+.mt-2 { margin-top: 0.5rem; }
+.gap-2 { gap: 0.5rem; }
+.gap-4 { gap: 1rem; }
+
+.text-sm { font-size: clamp(0.75rem, 1vw + 0.3rem, 0.875rem); }
+.text-xs { font-size: clamp(0.7rem, 0.8vw + 0.3rem, 0.75rem); }
+.text-xl { font-size: clamp(1.1rem, 1.2vw + 0.5rem, 1.25rem); }
+.text-2xl { font-size: clamp(1.2rem, 1.5vw + 0.5rem, 1.5rem); }
+.text-3xl { font-size: clamp(1.4rem, 2vw + 0.5rem, 1.875rem); }
+.text-4xl { font-size: clamp(1.6rem, 2.5vw + 0.5rem, 2.25rem); }
+
+/* Micro animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.3) rgba(0, 0, 0, 0.2);
+}
+
+/* Google Translate Overrides */
+.skiptranslate iframe {
+  display: none !important;
+}
+body {
+  top: 0 !important;
+}
+#goog-gt-tt, 
+.goog-te-balloon-frame,
+.VIpgJd-ZVi9od-ORHb-OEVmcd,
+.VIpgJd-ZVi9od-aZ2wEe-wOHMyf,
+.VIpgJd-ZVi9od-aZ2wEe,
+#google_translate_element,
+.goog-te-banner-frame { 
+  display: none !important;
+}
+.goog-text-highlight {
+  background: none !important;
+  box-shadow: none !important;
+}
+
+/* Sidebar Collapse Button RTL Fix */
+.sidebar-collapse-btn {
+  position: absolute;
+  top: 2rem;
+  inset-inline-end: -12px;
+  background: var(--bg-card);
+  border: var(--glass-border);
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  z-index: 50;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+  transition: all 0.3s ease;
+}
+
+.sidebar.collapsed .sidebar-collapse-btn {
+  inset-inline-end: 0;
+  transform: translateX(50%);
+}
+
+html[dir="rtl"] .sidebar.collapsed .sidebar-collapse-btn {
+  transform: translateX(-50%);
+}
+
+html[dir="rtl"] .collapse-icon {
+  transform: rotate(180deg);
+}
+
+/* --- Mobile Responsiveness --- */
+.mobile-only {
+  display: none !important;
+}
+
+@keyframes slideInLeft {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@media (max-width: 768px) {
+  .app-container {
+    flex-direction: column;
+  }
+
+  .content-wrapper {
+    flex: 1 !important;
+    height: auto !important;
+    width: 100% !important;
+  }
+
+  .sidebar {
+    display: none !important;
+  }
+
+  .desktop-only {
+    display: none !important;
+  }
+
+  .mobile-only {
+    display: flex !important;
+  }
+
+  .mobile-header-logo {
+    display: flex !important;
+    flex: 1;
+    justify-content: center;
+  }
+
+  .main-header {
+    padding: 0 1rem !important;
+    justify-content: space-between !important;
+  }
+
+  .main-content {
+    padding: 1rem !important;
+  }
+
+  /* Fix grids for mobile */
+  .grid-4, .grid-3, .grid-5 {
+    grid-template-columns: 1fr !important;
+  }
+
+  .flex-between {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  
+  .table-row-group .flex-between {
+    flex-wrap: nowrap !important;
+  }
+
+  input, button, textarea {
+    max-width: 100%;
+  }
+
+  .card > .flex-between > div {
+    min-width: 45%;
+  }
+  
+  .table-row-group .flex-between > div {
+    min-width: auto !important;
+  }
+}
+
+/* Workflow Pipeline Scrollbar */
+.workflow-pipeline::-webkit-scrollbar {
+  height: 6px;
+}
+.workflow-pipeline::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+}
+.workflow-pipeline::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.5);
+  border-radius: 10px;
+}
+.workflow-pipeline::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 229, 255, 0.8);
+}
+
+/* WhatsApp Floating Button */
+.whatsapp-float-btn {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: #25D366;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 4px 15px rgba(37, 211, 102, 0.4);
+  transition: transform 0.3s ease;
+}
+
+.whatsapp-float-btn:hover {
+  transform: scale(1.1);
+}
+
+@media (max-width: 768px) {
+  .whatsapp-float-btn {
+    width: 46px;
+    height: 46px;
+  }
+  .whatsapp-float-btn svg {
+    width: 24px;
+    height: 24px;
+  }
+}
+
+/* Custom mock dashboard animations */
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Redesigned Login Page Styles */
+.login-main-wrapper {
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  background: var(--bg-dark);
+  position: relative;
+}
+
+.login-split-container {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: row;
+  z-index: 1;
+}
+
+.login-info-column {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 2rem 3rem 2rem 5rem;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.login-form-column {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: clamp(1rem, 4vh, 2rem) clamp(1rem, 3vw, 3rem);
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.15);
+  border-left: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 2.5rem 2rem;
+  background: rgba(15, 15, 22, 0.7);
+  border: 1px solid rgba(0, 229, 255, 0.1);
+  box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+  border-radius: 1rem;
+  backdrop-filter: blur(20px);
+  box-sizing: border-box;
+  transition: all 0.3s ease;
+}
+
+.login-mobile-header {
+  display: none !important;
+}
+
+@media (max-width: 1024px) {
+  .login-main-wrapper {
+    /* Allow scrolling if content overflows mobile viewport */
+    height: 100vh !important;
+    height: 100dvh !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+  .login-split-container {
+    flex-direction: column !important;
+    height: 100% !important;
+  }
+  .login-info-column {
+    display: none !important;
+  }
+  .login-form-column {
+    flex: 1 !important;
+    background: transparent !important;
+    border-left: none !important;
+    padding: 2rem 1.5rem !important;
+    overflow-y: auto !important;
+    /* Use margin auto trick for safe centering with scrolling */
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: center;
+  }
+  .login-mobile-header {
+    display: flex !important;
+    margin-top: auto;
+  }
+  .login-card {
+    padding: 1.75rem 1.5rem !important;
+    width: 100%;
+    max-width: 400px;
+  }
+  .login-contact-box {
+    margin-bottom: auto;
+  }
+}
+
+/* Vertical scaling for short viewports (laptops, small monitors) */
+@media (max-height: 900px) and (min-width: 1025px) {
+  .login-info-column {
+    padding: 1.5rem 3rem 1.5rem 4rem !important;
+  }
+  .login-info-column h1 {
+    font-size: clamp(1.6rem, 3.2vw, 2.6rem) !important;
+    margin-bottom: 0.75rem !important;
+  }
+  .login-info-column p.text-muted {
+    font-size: 0.9rem !important;
+    margin-bottom: 1rem !important;
+    line-height: 1.45 !important;
+  }
+  .login-info-column > div:first-child {
+    margin-bottom: 1rem !important;
+  }
+  
+  /* Make the console widget more compact */
+  .login-mock-console {
+    padding: 1rem !important;
+  }
+  .login-mock-console-steps {
+    gap: 0.5rem !important;
+  }
+  .login-mock-console-step {
+    padding: 0.5rem !important;
+    gap: 0.5rem !important;
+  }
+  .login-mock-console-step p {
+    font-size: 0.65rem !important;
+  }
+  .login-mock-console-step span {
+    font-size: 0.75rem !important;
+  }
+  .login-mock-console-cli {
+    margin-top: 0.5rem !important;
+    padding: 0.5rem !important;
+    font-size: 0.7rem !important;
+  }
+}
+
+@media (max-height: 768px) and (min-width: 1025px) {
+  .login-info-column {
+    padding: 1rem 3rem 1rem 4rem !important;
+  }
+  .login-info-column h1 {
+    font-size: clamp(1.4rem, 2.8vw, 2.2rem) !important;
+    margin-bottom: 0.5rem !important;
+  }
+  .login-info-column p.text-muted {
+    font-size: 0.85rem !important;
+    margin-bottom: 0.75rem !important;
+    line-height: 1.4 !important;
+  }
+  .login-info-column > div:first-child {
+    margin-bottom: 0.75rem !important;
+  }
+  .login-mock-console {
+    padding: 0.75rem !important;
+  }
+  .login-mock-console-steps {
+    gap: 0.4rem !important;
+  }
+  .login-mock-console-step {
+    padding: 0.4rem !important;
+  }
+  .login-mock-console-step p {
+    display: none !important; /* Hide secondary step description on very short viewports to save vertical space */
+  }
+  .login-mock-console-cli {
+    margin-top: 0.4rem !important;
+    padding: 0.4rem !important;
+  }
+}
