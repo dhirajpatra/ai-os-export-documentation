@@ -32,15 +32,21 @@ def _build_pool() -> aioredis.ConnectionPool:
             "In Railway: add a Redis plugin and it appears automatically. "
             "Locally: set REDIS_URL=redis://localhost:6379 in your .env"
         )
-    return aioredis.ConnectionPool.from_url(
-        url,
-        max_connections=20,          # Upstash free tier limit is 100 concurrent
+
+    # redis-py v5 removed ssl_cert_reqs — use ssl_check_hostname=False for
+    # TLS URLs (rediss://) to replicate the old None behaviour.
+    # Plain redis:// connections (local Docker) need no SSL kwargs at all.
+    kwargs: dict = dict(
+        max_connections=20,
         decode_responses=True,
         socket_timeout=5,
         socket_connect_timeout=5,
         retry_on_timeout=True,
-        ssl_cert_reqs=None,
     )
+    if url.startswith("rediss://"):
+        kwargs["ssl_check_hostname"] = False
+
+    return aioredis.ConnectionPool.from_url(url, **kwargs)
 
 
 def get_redis() -> aioredis.Redis:
