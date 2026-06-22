@@ -5,15 +5,6 @@ set -e
 cd /home/dhiraj/Desktop/projects/ai-os-export-documentation/
 docker compose down
 
-# start server
-docker compose up -d
-
-# check server status
-docker ps
-
-# check images
-docker images
-
 # prune unused images
 docker image prune -f
 docker builder prune -f
