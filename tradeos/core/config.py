@@ -356,6 +356,101 @@ class LLMRouter:
             return {"text": resp.json()["message"]["content"]}
 
     @staticmethod
+    def regex_intent_gate(text: str) -> str:
+        """
+        Zero-cost pre-classifier. Runs purely on regex — no LLM, no network.
+
+        Returns one of:
+          "purchase_order" — clear PO signals (quantities, currency, trade terms)
+          "greeting"       — pure social opener with no trade content
+          "query"          — shipment status / product / pricing question
+          "ambiguous"      — cannot be decided cheaply → caller must use classify_intent()
+
+        Does NOT attempt to detect "complaint" or "ignore" — those require
+        language nuance and are left to the LLM fallback.
+
+        Design rules:
+          - Err on the side of "ambiguous": a false "purchase_order" wastes a
+            workflow run; a false "greeting" silently drops a real PO. So the PO
+            patterns are intentionally specific.
+          - Greeting patterns are anchored so a greeting tacked onto a PO doesn't
+            short-circuit the PO path.
+        """
+        import re
+
+        t = text.strip()
+        t_lower = t.lower()
+
+        # ── 1. DEFINITE PURCHASE ORDER signals ────────────────────────────────
+        # Any of these in the message body → treat as PO without LLM.
+
+        # Quantity + unit  (e.g. "500 kg", "20 MT", "1,000 pcs", "50 cartons")
+        _PO_QTY = re.compile(
+            r"\b\d[\d,]*\s*"
+            r"(kg|kgs|mt|mts|ton|tons|tonne|tonnes|"
+            r"pcs|pieces|units|boxes|box|cartons|carton|"
+            r"bags|bag|ltrs|liters|litres|dozen|dozens|"
+            r"quintal|quintals|cft|cbm)\b",
+            re.IGNORECASE,
+        )
+        # Currency amount  (e.g. "USD 2.5/kg", "$5000", "₹50,000", "AED 200")
+        _PO_CCY = re.compile(
+            r"(usd|us\$|\$|inr|₹|aed|eur|€|gbp|£|sgd|cad|aud)\s*[\d,]+|"
+            r"[\d,]+\s*(usd|inr|aed|eur|gbp|sgd|cad|aud)\b",
+            re.IGNORECASE,
+        )
+        # Classic trade / PO keywords
+        _PO_KW = re.compile(
+            r"\b("
+            r"purchase\s+order|p\.?o\.?\s*(no\.?|number|#)|"
+            r"order\s+(no\.?|number|ref)|"
+            r"delivery\s+(terms|date|schedule)|"
+            r"incoterms?|fob|cif|cfr|exw|dap|ddp|"
+            r"letter\s+of\s+credit|l/?c\s+(no\.?|terms)|"
+            r"advance\s+payment|payment\s+terms|"
+            r"proforma\s+invoice|pi\s+no\.?|"
+            r"hs\s*code|shipment\s+date|port\s+of\s+(loading|discharge)|"
+            r"packing\s+list|commercial\s+invoice"
+            r")\b",
+            re.IGNORECASE,
+        )
+
+        if _PO_QTY.search(t) or _PO_CCY.search(t) or _PO_KW.search(t):
+            return "purchase_order"
+
+        # ── 2. DEFINITE GREETING signals ──────────────────────────────────────
+        # Only fire when the message consists entirely of social openers / acknowledgements.
+        # A greeting followed by trade content must not be trapped here.
+        cleaned_words = re.findall(r"\b\w+\b", t_lower)
+        greeting_words = {
+            "hi", "hello", "hey", "heyy", "good", "morning", "afternoon", "evening", "day",
+            "greetings", "thanks", "thank", "you", "ok", "okay", "noted", "namaste", "salam",
+            "hope", "are", "well", "fine", "dear", "sir", "team", "mr", "mrs", "ms",
+            "yes", "no", "sure", "welcome", "please"
+        }
+        if cleaned_words and all(w in greeting_words for w in cleaned_words):
+            return "greeting"
+
+        # ── 3. DEFINITE QUERY signals ─────────────────────────────────────────
+        _QUERY = re.compile(
+            r"\b("
+            r"where\s+is\s+my|shipment\s+status|track(ing)?|"
+            r"eta|when\s+will|expected\s+(arrival|delivery)|"
+            r"document(s)?\s+(ready|status|pending)|"
+            r"certificate(\s+of\s+origin)?|phytosanitary|"
+            r"what\s+is\s+(your|the)\s+price|minimum\s+order|"
+            r"do\s+you\s+(have|supply)|can\s+you\s+ship|"
+            r"price\s+(list|per\s+kg|per\s+mt)|catalogue|catalog"
+            r")\b",
+            re.IGNORECASE,
+        )
+        if _QUERY.search(t):
+            return "query"
+
+        # ── 4. Everything else → let the LLM decide ───────────────────────────
+        return "ambiguous"
+
+    @staticmethod
     async def classify_intent(text: str) -> str:
         system = (
             "You are a WhatsApp message classifier for an international seafood and "

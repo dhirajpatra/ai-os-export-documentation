@@ -44,7 +44,7 @@ export default function LandingPage() {
           <li><a href="#features">Platform</a></li>
           <li><a href="#how">How It Works</a></li>
           <li><a href="#pricing">Pricing</a></li>
-          <li><Link to="/login" className="nav-cta">Live Demo →</Link></li>
+          <li><a href="https://demo.exportagent.online" className="nav-cta" target="_blank" rel="noopener noreferrer">Live Demo →</a></li>
         </ul>
       </nav>
 
@@ -65,7 +65,7 @@ export default function LandingPage() {
           <p className="hero-sub">The free local platform enables organizations to build AI-assisted operational workflows while maintaining full control over their documents, shipment records, communication history, and internal business processes. Customers can optionally connect their local AgentOS to TradeOS cloud MCP services for advanced trade intelligence, compliance assistance, freight intelligence, and specialized export workflow capabilities.</p>
           <br /><small>Active development going on for pilot programs</small>
           <div className="hero-ctas">
-            <Link to="/login" className="btn-primary">Try the Live Demo &rarr;</Link>
+            <a href="https://demo.exportagent.online" className="btn-primary" target="_blank" rel="noopener noreferrer">Try the Live Demo &rarr;</a>
             <a href="#how" className="btn-secondary">See how it works</a>
           </div>
           <div className="hero-trust">
@@ -449,7 +449,7 @@ export default function LandingPage() {
                 <li><a href="#features">Features</a></li>
                 <li><a href="#how">How it works</a></li>
                 <li><a href="#pricing">Pricing</a></li>
-                <li><Link to="/login" target="_blank">Live Demo</Link></li>
+                <li><a href="https://demo.exportagent.online" target="_blank" rel="noopener noreferrer">Live Demo</a></li>
               </ul>
             </div>
             <div className="footer-links">

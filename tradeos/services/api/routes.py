@@ -690,9 +690,14 @@ async def _process_inbound_whatsapp(msg: dict, org_id: uuid.UUID):
         if not text.strip():
             return
 
-        # ── Intent gate — classify before touching the workflow ────────
-        intent = await LLMRouter.classify_intent(text)
-        print(f"[WA intent] intent={intent} from={sender}")
+        # ── Intent gate: regex first (free), LLM only when ambiguous ──────────
+        gate = LLMRouter.regex_intent_gate(text)
+        if gate != "ambiguous":
+            intent = gate
+            print(f"[WA intent] gate={intent!r} (regex, no LLM cost) from={sender}")
+        else:
+            intent = await LLMRouter.classify_intent(text)
+            print(f"[WA intent] intent={intent!r} (LLM fallback) from={sender}")
 
         if intent == "ignore":
             return
