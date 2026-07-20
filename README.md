@@ -1,700 +1,189 @@
 # TradeOS
-### Agentic AI Operating System for Export Documentation
 
-> **"AI operates workflows. Humans supervise."**
+**Agentic AI operating system for India–GCC export documentation.**
+"AI operates workflows. Humans supervise."
 
-![TradeOS](docs/logo.jpeg)
-![AI Agentic OS For Trade](docs/header_logo.png)
-
-
-`TradeOS` replaces manual export documentation, WhatsApp-based operations, and fragmented systems with an autonomous multi-agent AI layer for India–GCC trade corridors. AI agents and employees collaborate from the same projects, conversations, and files, governed centrally and connected to existing enterprise systems.
-
---------------------------------------------------------------------------------
-
-Hi,
-
-We are building a platform called TradeOS.
-
-TradeOS is an AI operating system specifically designed for export houses, freight forwarders, and logistics SMEs.
-
-Over the last few months, we studied how export companies in India and GCC markets actually operate day to day.
-
-We noticed that most operations still depend heavily on:
-• WhatsApp
-• emails
-• PDFs
-• Excel sheets
-• manual documentation
-• experienced staff memory
-
-And because of this, companies face recurring issues like:
-• documentation delays
-• repeated data entry
-• shipment coordination problems
-• dependency on a few experienced employees
-• lack of operational visibility
-• compliance risks
-
-What we are building is not just another ERP or chatbot.
-
-TradeOS acts like an AI operational workforce layer on top of your existing workflows.
-
-For example:
-
-A customer sends a purchase order through WhatsApp or email.
-
-TradeOS can automatically:
-• extract order details
-• generate invoices
-• create packing lists
-• validate compliance requirements
-• coordinate shipment workflows
-• send customer updates
-• track approvals
-• maintain operational audit trails
-
-All while your team supervises and approves critical steps.
-
-The idea is not to replace your people.
-
-The idea is to reduce repetitive operational workload so your team can handle more shipments with fewer bottlenecks. Eventually your team will get AI digital employees who will work 24/7 without breaks and will be available for your team members anytime they need help.
-
-Right now we are developing the MVP and working closely with real export and logistics workflows from Kochi and other export-centric cities of India and GCC-countries
-
-At this stage, we are looking for a few operational partners to:
-• understand real workflows
-• validate pain points
-• test automation scenarios
-• co-develop practical features
-
-We are not asking you to replace your systems.
-
-Initially, we only want to demonstrate a few practical workflows like:
-• AI-assisted documentation
-• shipment coordination
-• automated customer communication
-• workflow tracking
-
-Our long-term vision is to build an AI-native operational platform for export and logistics SMEs across India and GCC markets.
-
-Since your company already handles real operational complexity, your feedback would be extremely valuable for us.
-
-If possible, I’d love to show you a quick demo and understand:
-• where your team spends most manual effort
-• which documentation processes create delays
-• where communication bottlenecks happen
-• and how AI can realistically assist your operations.
-
-One documentation executive in a export or freight forwarding company using TradeOS can process 3–5x more shipments.
----
-
-## Architecture Principles
-
-![System Architecture](docs/architecture-mermaid-diagram.png)
-
-| Principle | Why |
-|-----------|-----|
-| **LLM-agnostic** | Models change every 6 months. Your moat is workflows + data, not the model. |
-| **Deterministic workflow engine** | LLMs are tools called within steps — not orchestrators. |
-| **Memory-first** | Agents learn and improve with every transaction. This is the moat. |
-| **HITL by design** | Safe autonomy, not full autonomy. Enterprise trust requires human checkpoints. |
-| **Event-driven** | Every action emits events. SSE and WebSockets power async, auditable operations. |
-| **Multi-tenant** | Row-level security. Every query is scoped to org_id. |
+TradeOS replaces manual export documentation, WhatsApp-based operations, and
+fragmented ERP systems with a multi-agent AI layer that automates purchase
+order intake, HS code validation, invoice/packing list generation, compliance
+checks, and shipment tracking — with human approval gates on anything below
+a confidence threshold.
 
 ---
 
-## Project Structure
+## Two editions
+
+TradeOS ships as two separate things. This split is intentional, not
+incidental — it's how we let customers run parts of the stack on their own
+hardware while keeping the compliance/documentation intelligence centralized
+and maintained.
+
+| | **TradeOS Local** (this repo, open source) | **TradeOS Cloud** (private) |
+|---|---|---|
+| **Who runs it** | Customer, on their own machine/server | Us, as a managed service |
+| **Requires** | Docker, optionally a GPU for OCR/local LLM | Nothing from the customer |
+| **Data store** | SQLite (`local_schema.sql`) — stays on device | PostgreSQL + pgvector, multi-tenant |
+| **PO extraction** | Rule-based (regex) + template matching — zero LLM cost for repeat buyers | Full LLM pipeline (Claude/GPT-4o/Groq) with tuned prompts |
+| **Compliance / HS / doc generation** | Calls our MCP API | Runs natively — this *is* the MCP server |
+| **Prompts, regulatory KB, learned cross-org data** | Not included | Proprietary — this is what you're paying for |
+| **Networking** | Needs outbound access to `TRADEOS_CLOUD_URL` for rules sync + MCP calls | N/A |
+
+**In short:** the local edition handles ingestion, cheap/deterministic
+extraction, and local storage. Anything that requires real trade-compliance
+reasoning — HS validation, invoice/packing list generation, country rules,
+sanctions screening — is a metered API call to TradeOS Cloud via MCP. This
+repo never contains our system prompts, regulatory knowledge base, or
+learned per-org intelligence.
+
+If you're looking for the managed cloud product, see
+[cloud.tradeos.in](https://cloud.tradeos.in) — this repo is the self-hosted
+local component only.
+
+---
+
+## Architecture
 
 ```
-tradeos/
-├── services/
-│   ├── api/
-│   │   └── main.py              ← FastAPI app, all agents, LLM router, WhatsApp
-│   ├── agents/                  ← Agent implementations (extend BaseAgent)
-│   ├── workflows/               ← Temporal workflow definitions
-│   └── integrations/            ← DHL, FedEx, Maersk, Tally, Zoho connectors
-│
+┌─────────────────────────────┐        ┌──────────────────────────────┐
+│  TradeOS Local (this repo)  │        │  TradeOS Cloud (private)     │
+│  customer's machine         │        │  our infra                   │
+│                              │        │                               │
+│  WhatsApp/Email intake       │        │  MCP API                     │
+│  RuleBasedExtractor (regex)  │──MCP──▶│    /mcp/hs/validate           │
+│  TemplateMatcher (learned)   │  calls │    /mcp/rules/manifest        │
+│  SQLite local storage        │◀───────│    /mcp/rules/bundle/{v}     │
+│  Ollama (optional local LLM) │        │                               │
+│  PaddleOCR (CPU or GPU)      │        │  Prompt Registry (proprietary)│
+│                              │        │  Regulatory KB / HS codes     │
+│  rules_sync.py ──pulls──────▶│        │  Multi-org learning           │
+└─────────────────────────────┘        └──────────────────────────────┘
+```
+
+**Extraction is three-layered, cheapest first** (see
+`services/agents/po_extraction.py` in the full pipeline):
+
+1. **Rule-based** (regex/keyword) — ₹0, handles ~60–70% of repeat shipments
+2. **Template matching** — ₹0, per-buyer learned patterns from prior extractions
+3. **MCP / LLM fallback** — metered call to TradeOS Cloud, only for novel
+   formats, new buyers, or ambiguous text
+
+This repo ships layers 1 and 2 in full. Layer 3 is a thin MCP client — no
+prompts, no model calls, live here.
+
+---
+
+## What's in this repo
+
+```
+├── local_schema.sql              SQLite schema — orders, contacts, documents,
+│                                  workflows, agent_memory (no embeddings),
+│                                  po_templates, hitl_corrections
 ├── core/
-│   ├── db/                      ← SQLAlchemy models + async session
-│   ├── workflow_engine.py       ← Deterministic state machine (saga pattern)
-│   ├── memory.py                ← Agent memory layer (pgvector)
-│   ├── prompt_registry.py       ← Versioned prompt store with fallback chains
-│   └── rbac.py                  ← Roles, permissions, approval chains, JWT auth
-│
-├── 001_core_schema.sql          ← Full PostgreSQL schema (multi-tenant, audit-ready)
-│
-├── config/                      ← Environment configs per deployment
-├── docker-compose.yml           ← Full stack: Postgres+pgvector, Redis, Temporal, OCR
-└── requirements.txt
+│   ├── rules_sync.py              Pulls versioned HS/compliance bundles
+│   │                              from TradeOS Cloud (non-fatal if offline)
+│   ├── mcp_auth.py                Client-side MCP key handling
+│   └── redis_client.py            Optional local cache
+├── services/
+│   ├── agents/
+│   │   ├── rule_based_extractor.py   Zero-LLM PO field extraction
+│   │   └── template_matcher.py       Learned buyer-format templates
+│   ├── integrations/
+│   │   └── whatsapp.py               WhatsApp Business / Twilio intake
+│   └── ocr/                          PaddleOCR sidecar (CPU or GPU image)
+└── docker-compose.yml              Local stack: app + Ollama + OCR + SQLite volume
 ```
+
+**Not in this repo** (cloud-only):
+
+- `core/prompt_registry.py` — all system prompts and confidence rubrics
+- `services/compliance/`, regulatory knowledge base, HS/country-rule datasets
+- Full `HSCodeValidationAgent` / `DocumentGenerationAgent` LLM logic
+- Any customer FAQ/company-specific content
+- Cross-org learning and the shared knowledge graph
 
 ---
 
-## The Killer Demo Flow
+## Requirements
 
-```
-WhatsApp PO / PDF Upload
-        │
-        ▼
-┌─────────────────────┐
-│  POExtractionAgent  │  ← LLM extracts: buyer, items, HS codes, terms, currency
-│  (+ Doc Intelligence│    Arabic/English/Hindi input normalized
-│   Engine for PDFs)  │    Confidence scored per field
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  HSValidationAgent  │  ← Validates each HS code against DGFT, UAE Customs
-│                     │    Flags: prohibited goods, CITES, SCOMET, duty rates
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  DocGenerationAgent │  ← Generates: Commercial Invoice, Packing List
-│                     │    LC-compliant fields, SWIFT MT700 alignment
-│                     │    Buyer style preferences applied from memory
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  HITL Orchestrator  │  ← confidence ≥ 75% + no high flags → AUTO APPROVE
-│                     │    confidence 65%–74% → soft review (1-minute check)
-│                     │    confidence < 65% or critical flag → BLOCK + notify
-└─────────┬───────────┘
-          │
-    ┌─────┴─────┐
-    │           │
-    ▼           ▼
-Auto-approved  Awaiting human
-    │           │ (approval_requests table)
-    └─────┬─────┘
-          │ approved
-          ▼
-┌─────────────────────┐
-│  CommAgent sends    │  ← WhatsApp message to buyer (Arabic or English)
-│  invoice + updates  │    Email with PDF attachments
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  LogisticsAgent     │  ← Creates shipment record, triggers carrier booking
-│  activates tracking │    ETA prediction, container updates
-└─────────────────────┘
-```
-
-**Single API call to run this entire flow:**
-```bash
-curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
-  -F "po_text=500kg Black Tea to Dubai, LC payment, CIF Jebel Ali" \
-  -F "buyer_whatsapp=+971501234567"
-```
+- Docker + Docker Compose
+- A TradeOS Cloud API key (`tos_live_...`) — generated during onboarding via
+  `POST /api/v1/mcp/keys/generate` against the cloud API, **not** shipped in
+  this image
+- **Optional:** an NVIDIA GPU for faster OCR (PaddleOCR) and to run a larger
+  local LLM via Ollama instead of the default small fallback model. CPU-only
+  works fine at lower throughput.
 
 ---
 
-📁 Create .env File
-Create a .env file in the same directory as your docker-compose.yml:
+## Quick start
 
-env
-# Database
-POSTGRES_USER=tradeos
-POSTGRES_PASSWORD=your_secure_password_here
-POSTGRES_DB=tradeos
-POSTGRES_HOST_PORT=5433
-
-# Redis
-REDIS_HOST_PORT=6380
-
-# Ollama
-OLLAMA_BASE_URL=http://ollama:11434
-OLLAMA_MODEL=qwen2.5:3b
-
-# OpenClaw Security (generate with: openssl rand -hex 32)
-OPENCLAW_AUTH_TOKEN=your_generated_64_char_hex_token_here
-OPENCLAW_AGENT_TO_AGENT_ENABLED=true
-
-# Optional: Cloud API keys for hybrid models
-# OPENAI_API_KEY=sk-...
-# ANTHROPIC_API_KEY=sk-ant-...
-🚀 Deployment Steps
-Step 1: Generate OpenClaw Auth Token
-powershell
-# Generate a secure token
-openssl rand -hex 32
-# Or use PowerShell
--join ((48..57) + (65..90) + (97..122) | Get-Random -Count 64 | ForEach-Object {[char]$_})
-Step 2: Pull Required Models into Ollama
-powershell
-# Start Ollama first
-docker-compose up -d ollama
-
-# Wait for Ollama to initialize
-Start-Sleep -Seconds 10
-
-# Pull your model (same as configured in .env)
-docker exec -it ollama ollama pull qwen2.5:3b
-
-# Optional: Pull embedding model for vector search
-docker exec -it ollama ollama pull nomic-embed-text
-
-# Verify
-docker exec -it ollama ollama list
-Step 3: Initialize PostgreSQL Extensions
-powershell
-# Start postgres and create pgvector extension
-docker-compose up -d postgres
-
-# Wait for postgres to be healthy
-Start-Sleep -Seconds 5
-
-# Create vector extension (for OpenClaw memory)
-docker exec -it postgres psql -U tradeos -d tradeos -c "CREATE EXTENSION IF NOT EXISTS vector;"
-Step 4: Start Full Stack
-powershell
-# Start all services
-docker-compose up -d
-
-# Monitor logs
-docker-compose logs -f
-
-# Check all services are running
-docker-compose ps
-Expected output:
-
-text
-NAME            STATUS          PORTS
-api             running         0.0.0.0:8000->8000/tcp
-openclaw        running         127.0.0.1:18789->18789/tcp
-postgres        healthy         0.0.0.0:5433->5432/tcp
-redis           healthy         0.0.0.0:6380->6379/tcp
-temporal        running         0.0.0.0:7233->7233/tcp
-temporal-ui     running         0.0.0.0:8088->8080/tcp
-ocr             running         0.0.0.0:8100->8100/tcp
-ollama          running         0.0.0.0:11434->11434/tcp
-Step 5: Configure OpenClaw
-powershell
-# Enter OpenClaw container
-docker exec -it openclaw bash
-
-# Configure Ollama provider
-openclaw config set models.providers.ollama.baseUrl "http://ollama:11434"
-openclaw config set models.providers.ollama.apiKey "ollama-local"
-
-# Set default model
-openclaw config set agents.defaults.model.primary "ollama/qwen2.5:3b"
-
-# Enable agent-to-agent communication
-openclaw config set tools.agentToAgent.enabled true
-
-# List available models
-openclaw models list
-
-# Exit
-exit
-Step 6: Access Services
-Service	URL	Purpose
-TradeOS API	http://localhost:8000	Your FastAPI backend
-OpenClaw Dashboard	http://localhost:18789	Multi-agent control UI
-Temporal UI	http://localhost:8088	Workflow monitoring
-Ollama API	http://localhost:11434	Local LLM endpoint
-🎯 Create Custom Agents for TradeOS
-powershell
-# Create specialized agents that can interact with TradeOS APIs
-docker exec -it openclaw openclaw agents add trading_analyst \
-  --workspace /root/.openclaw/workspace/trading \
-  --description "Analyzes market data from TradeOS API"
-
-docker exec -it openclaw openclaw agents add document_processor \
-  --workspace /root/.openclaw/workspace/docs \
-  --description "Processes documents using PaddleOCR"
-
-docker exec -it openclaw openclaw agents add workflow_orchestrator \
-  --workspace /root/.openclaw/workspace/workflows \
-  --description "Orchestrates multi-step trading workflows"
-🔗 Integrating OpenClaw with TradeOS API
-Create an OpenClaw tool definition to call your TradeOS API:
-
-json
-{
-  "tools": {
-    "custom": [
-      {
-        "name": "tradeos_query",
-        "description": "Query TradeOS API for trading data",
-        "url": "http://api:8000/api/query",
-        "method": "POST",
-        "headers": {
-          "Content-Type": "application/json"
-        }
-      }
-    ]
-  }
-}
-📊 Management Commands
-Action	Command
-Start all	docker-compose up -d
-Stop all	docker-compose down
-Restart OpenClaw only	docker-compose restart openclaw
-View OpenClaw logs	docker-compose logs -f openclaw
-View all logs	docker-compose logs -f
-List agents	docker exec -it openclaw openclaw agents list
-Test Ollama	docker exec -it ollama ollama run qwen2.5:3b "Hello"
-Rebuild API after changes	docker-compose up -d --build api
-Full cleanup (deletes all data)	docker-compose down -v
-✅ Verification Checklist
-powershell
-# 1. Check all containers running
-docker-compose ps --format "table {{.Name}}\t{{.Status}}"
-
-# 2. Test Ollama
-curl http://localhost:11434/api/generate -d '{"model":"qwen2.5:3b","prompt":"Hello"}'
-
-# 3. Test PostgreSQL + pgvector
-docker exec -it postgres psql -U tradeos -d tradeos -c "SELECT extname FROM pg_extension WHERE extname='vector';"
-
-# 4. Test Redis
-docker exec -it redis redis-cli ping
-
-# 5. Test OpenClaw
-docker exec -it openclaw openclaw doctor
-
-# 6. Test TradeOS API
-curl http://localhost:8000/health
-
-🐛 Troubleshooting
-
-Issue	Solution
-
-OpenClaw can't connect to Ollama	Ensure OLLAMA_BASE_URL=http://ollama:11434 (not localhost)
-
-pgvector extension missing	Run docker exec -it postgres psql -U tradeos -c "CREATE EXTENSION vector;"
-
-Port conflicts	Change host ports in .env file
-OpenClaw auth required	Visit http://localhost:18789/setup to approve device
-GPU not detected	Run docker exec -it ollama nvidia-smi to verify
-Memory issues	Pull smaller model or add memory limits to docker-compose
-Your TradeOS backend now shares PostgreSQL, Redis, and Ollama with OpenClaw's multi-agent system. Agents can access your API via the internal Docker network using http://api:8000, and all data (including vector embeddings for agent memory) lives in the same PostgreSQL database.
-
-## Quick Start
-
-### 1. Environment
 ```bash
+git clone https://github.com/<your-org>/tradeos-local.git
+cd tradeos-local
+
 cp .env.example .env
-# Fill in: JWT_SECRET and either Twilio or Meta WhatsApp credentials.
+# Fill in:
+#   TRADEOS_MCP_KEY=tos_live_...       (from your cloud account)
+#   TRADEOS_CLOUD_URL=https://cloud.tradeos.in
+#   LOCAL_ORG_ID=<uuid from onboarding>
+#   WHATSAPP_TOKEN=...                 (if using WhatsApp intake)
+
+# CPU (default):
+docker compose up -d
+
+# GPU (faster OCR + local LLM):
+docker compose --profile gpu up -d
 ```
 
-The API container loads runtime configuration directly from `.env` via
-`docker-compose.yml`, and `Dockerfile.api` includes `.env` in the image build.
+Check it came up clean:
 
-For the MVP Twilio WhatsApp path, keep:
 ```bash
-WHATSAPP_PROVIDER=twilio
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_PHONE_NUMBER=whatsapp:+14155238886
+docker compose exec api curl -sf http://localhost:8000/health
+docker compose exec api curl -s http://ollama:11434/api/tags
 ```
 
-The direct Meta WhatsApp option remains available with `WHATSAPP_PROVIDER=meta`
-and `WHATSAPP_TOKEN` / `WHATSAPP_PHONE_ID`.
-
-For the current Meta business portfolio:
-```bash
-META_BUSINESS_NAME="AI Agentic OS For Trade"
-META_BUSINESS_PORTFOLIO_ID="2841939439484082"
-FACEBOOK_BUSINESS_ID="2841939439484082"
-```
-
-Keep `WHATSAPP_PHONE_ID` and `WHATSAPP_BUSINESS_ID` from the WhatsApp
-Cloud API screen. The business portfolio ID is different from the phone
-number ID.
-
-### 2. Start the stack
-```bash
-docker compose up -d --build api
-```
-
-Postgres and Redis use non-default host ports to avoid colliding with services
-already running on your machine:
-
-- Postgres: `localhost:5433` -> container `5432`
-- Redis: `localhost:6380` -> container `6379`
-
-Override them if needed:
-```bash
-POSTGRES_HOST_PORT=5432 REDIS_HOST_PORT=6379 docker compose up -d postgres redis
-```
-
-### 3. Check services
-```bash
-docker compose ps
-```
-
-### 3.a. Pull Ollama Model If not done already
-`docker exec ollama ollama pull qwen2.5:3b`
-
-### 4. Run killer demo
-```bash
-# Text PO
-curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
-  -F "po_text=We need 1000 KG Basmati Rice Grade A, destination Dubai, CIF, USD 1.20/kg, payment by LC"
-
-# PDF upload
-curl -X POST http://localhost:8000/api/v1/workflow/po-to-dispatch \
-  -F "file=@sample_po.pdf" \
-  -F "buyer_whatsapp=+971501234567"
-```
-
-### 5. Dev with WhatsApp
-```bash
-docker compose --profile dev up ngrok
-# Twilio webhook URL: https://<ngrok-domain>/api/v1/webhooks/twilio/whatsapp
-# Meta webhook URL: https://<ngrok-domain>/api/v1/webhooks/whatsapp
-# ngrok http 8000 --url=preindulgent-madonna-reliably.ngrok-free.dev
-```
-
-
-## Key API Endpoints
-
-### Workflow
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/workflow/po-to-dispatch` | **THE killer demo** — full pipeline |
-| GET  | `/ws/workflow/{id}` | WebSocket live step updates |
-
-### HITL Approvals
-| Method | Path | Description |
-|--------|------|-------------|
-| GET  | `/api/v1/approvals` | List pending approvals for org |
-| POST | `/api/v1/approvals/{id}/action` | Approve / reject / request changes |
-
-### Documents
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/documents/extract` | Upload any trade doc → AI extraction |
-| POST | `/api/v1/documents/generate` | Generate invoice/packing list/COO |
-
-### Compliance
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/v1/compliance/hs-validate` | Validate HS codes for a route |
-
-### Memory
-| Method | Path | Description |
-|--------|------|-------------|
-| GET  | `/api/v1/memory/search?query=...` | Semantic memory search |
-| POST | `/api/v1/memory` | Manually upsert memory |
-
-### WhatsApp
-| Method | Path | Description |
-|--------|------|-------------|
-| GET  | `/api/v1/webhooks/whatsapp` | Verification handshake |
-| POST | `/api/v1/webhooks/whatsapp` | Meta inbound message handler |
-| POST | `/api/v1/webhooks/twilio/whatsapp` | Twilio inbound message handler |
+Rules sync (HS codes, compliance flags) pulls automatically every
+`RULES_SYNC_INTERVAL_H` hours (default 6) — see `core/rules_sync.py`. If
+`TRADEOS_CLOUD_URL` is unreachable, the local install keeps running on
+whatever rules it last synced; nothing blocks on connectivity.
 
 ---
 
-## LLM Provider Chain
+## How data flows
 
-Tried in priority order. Automatic fallback on error.
+- **Stays local, never leaves the device:** raw PO text/files, `audit_log`,
+  `workflows`/`workflow_steps` (internal saga state), document file bytes.
+- **Synced up to cloud** (so your cloud account has a full picture):
+  contacts, orders, `po_templates`, `agent_memory` (without embeddings —
+  cloud re-embeds), `hitl_corrections` (this is what improves the shared
+  model over time).
+- **Synced down from cloud:** HS codes, compliance rules, prompt updates
+  (never the prompt *text* itself — only what's needed to render), logistics
+  vendor profiles.
 
-```
-1. OpenAI GPT-4o          (priority 1 — speed + tool use)
-2. GroqCloud Llama         (priority 2 — fast OpenAI-compatible API)
-3. xAI Grok 4.3            (priority 3 — OpenAI-compatible API)
-4. Anthropic Claude        (priority 4 — best for long docs)
-5. Google Gemini 2.0 Flash (priority 5 — multimodal)
-6. Local Ollama/Mistral    (priority 6 — always-on fallback, no API cost)
-```
-
-Switch priority or disable providers in `Settings.LLM_CHAIN`. GroqCloud keys usually start with `gsk_` and use `GROQ_API_KEY`; xAI Grok uses `XAI_API_KEY`. **Never hardcode a model.**
-
----
-
-## Agent Memory — The Moat
-
-Every completed workflow trains the system:
-
-| What agents learn | Scope | Benefits over time |
-|-------------------|-------|--------------------|
-| Buyer currency / port preferences | Per contact | Zero re-entry across orders |
-| Validated HS codes for your catalog | Per product | Faster, more accurate compliance |
-| Invoice styles each buyer expects | Per contact | Documents that never get rejected |
-| Transit times per carrier + route | Per route | Accurate ETA predictions |
-| Compliance rules per HS + country | Per route | Proactive blocking before mistakes |
-| Payment behavior / risk signals | Per contact | Finance agent credit alerts |
-| Human override patterns | Per org | AI learns from every correction |
+See the `-- [SYNC UP]`, `-- [SYNC DOWN]`, `-- [LOCAL ONLY]` annotations in
+`local_schema.sql` for the exact table-by-table breakdown.
 
 ---
 
-## HITL Confidence Thresholds
+## Security notes
 
-| Confidence | Action |
-|------------|--------|
-| ≥ 92% + no high flags | Auto-approve, dispatch immediately |
-| 70–91% | Flag for optional 30-second human review |
-| < 70% | Mandatory human review, workflow blocked |
-| Any critical compliance flag | Mandatory review regardless of confidence |
-
-Thresholds configurable per org in settings.
-
-## PO Extraction Agent
-
-![PO Sample Page](docs/sample_po_page-0001.jpg)
-
-### Extracted Markdown
-
-## PURCHASE ORDER
-
-
-<table border=1 style='margin: auto; word-wrap: break-word;'><tr><td style='text-align: center; word-wrap: break-word;'>PO Number:</td><td style='text-align: center; word-wrap: break-word;'>AEIPL/PO/2026/0542</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>PO Date:</td><td style='text-align: center; word-wrap: break-word;'>15 May 2026</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Valid Until:</td><td style='text-align: center; word-wrap: break-word;'>30 June 2026</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Incoterms:</td><td style='text-align: center; word-wrap: break-word;'>CIF – Jebel Ali Port, Dubai (UAE)</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Currency:</td><td style='text-align: center; word-wrap: break-word;'>USD (United States Dollar)</td></tr></table>
-
-
-<table border=1 style='margin: auto; word-wrap: break-word;'><tr><td style='text-align: center; word-wrap: break-word;'>BUYER (Importer)</td><td style='text-align: center; word-wrap: break-word;'>SELLER (Exporter)</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>AL NOOR FOODSTUFF TRADING LLC</td><td style='text-align: center; word-wrap: break-word;'>AGRO EXPORTS INDIA PVT. LTD.</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>P.O. Box 47823, Deira, Dubai, United Arab Emirates</td><td style='text-align: center; word-wrap: break-word;'>123, Nariman Point, Mumbai - 400021, India</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>TRN (VAT): 100358291200003</td><td style='text-align: center; word-wrap: break-word;'>IEC: AABCA1234C | GSTIN: 27AABCA1234C1Z5</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Contact: Mr. Ahmed Al Rashidi</td><td style='text-align: center; word-wrap: break-word;'>Contact: Ms. Priya Sharma</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Tel: +971-4-226-8800 | Email: procurement@alnoorfoods.ae</td><td style='text-align: center; word-wrap: break-word;'>Tel: +91-22-4567-8901 | Email: priya.sharma@agroexportsindia.com</td></tr></table>
-
-## SHIPMENT & PAYMENT DETAILS
-
-
-<table border=1 style='margin: auto; word-wrap: break-word;'><tr><td style='text-align: center; word-wrap: break-word;'>Port of Loading</td><td style='text-align: center; word-wrap: break-word;'>Nhava Sheva (JNPT), Mumbai, India</td><td style='text-align: center; word-wrap: break-word;'>Payment Terms</td><td style='text-align: center; word-wrap: break-word;'>Irrevocable LC at Sight (SWIFT MT700)</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Port of Discharge</td><td style='text-align: center; word-wrap: break-word;'>Jebel Ali Port, Dubai, UAE</td><td style='text-align: center; word-wrap: break-word;'>LC Issuing Bank</td><td style='text-align: center; word-wrap: break-word;'>Emirates NBD, Dubai (SWIFT: EBILAEAD)</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Mode of Transport</td><td style='text-align: center; word-wrap: break-word;'>Sea Freight - Full Container Load (FCL)</td><td style='text-align: center; word-wrap: break-word;'>LC Validity</td><td style='text-align: center; word-wrap: break-word;'>60 days from shipment date</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Shipment By</td><td style='text-align: center; word-wrap: break-word;'>30 June 2026 (latest)</td><td style='text-align: center; word-wrap: break-word;'>Partial Shipment</td><td style='text-align: center; word-wrap: break-word;'>Not Allowed</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>Container Type</td><td style='text-align: center; word-wrap: break-word;'>1 x 20&#x27; GP Container</td><td style='text-align: center; word-wrap: break-word;'>Transhipment</td><td style='text-align: center; word-wrap: break-word;'>Not Allowed</td></tr></table>
-
-## ORDER LINE ITEMS
-
-
-<table border=1 style='margin: auto; word-wrap: break-word;'><tr><td style='text-align: center; word-wrap: break-word;'>Sr.</td><td style='text-align: center; word-wrap: break-word;'>Product Description</td><td style='text-align: center; word-wrap: break-word;'>HS Code</td><td style='text-align: center; word-wrap: break-word;'>Qty (MT)</td><td style='text-align: center; word-wrap: break-word;'>Unit Price (USD)</td><td style='text-align: center; word-wrap: break-word;'>Amount (USD)</td><td style='text-align: center; word-wrap: break-word;'>Country of Origin</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>1</td><td style='text-align: center; word-wrap: break-word;'>Basmati Rice – Grade A Extra Long Grain (1121 Variety, Aged 2 Years, Sortex Cleaned) Packing: 25 kg PP Woven Bags</td><td style='text-align: center; word-wrap: break-word;'>1006.30.20</td><td style='text-align: center; word-wrap: break-word;'>10.0</td><td style='text-align: center; word-wrap: break-word;'>1,200.00</td><td style='text-align: center; word-wrap: break-word;'>12,000.00</td><td style='text-align: center; word-wrap: break-word;'>India</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>2</td><td style='text-align: center; word-wrap: break-word;'>Basmati Rice – Grade B Long Grain (Pusa 1121, Non-Aged) Packing: 50 kg Jute Bags</td><td style='text-align: center; word-wrap: break-word;'>1006.30.20</td><td style='text-align: center; word-wrap: break-word;'>5.0</td><td style='text-align: center; word-wrap: break-word;'>980.00</td><td style='text-align: center; word-wrap: break-word;'>4,900.00</td><td style='text-align: center; word-wrap: break-word;'>India</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>3</td><td style='text-align: center; word-wrap: break-word;'>Broken Basmati Rice (5% Brokens) Packing: 25 kg PP Woven Bags</td><td style='text-align: center; word-wrap: break-word;'>1006.40.00</td><td style='text-align: center; word-wrap: break-word;'>3.0</td><td style='text-align: center; word-wrap: break-word;'>620.00</td><td style='text-align: center; word-wrap: break-word;'>1,860.00</td><td style='text-align: center; word-wrap: break-word;'>India</td></tr><tr><td style='text-align: center; word-wrap: break-word;'>4</td><td style='text-align: center; word-wrap: break-word;'>Rice Bran Oil – Refined (Edible Grade, 15 kg Tins) Certification: FSSAI &amp; Halal</td><td style='text-align: center; word-wrap: break-word;'>1514.19.00</td><td style='text-align: center; word-wrap: break-word;'>2.0</td><td style='text-align: center; word-wrap: break-word;'>1,450.00</td><td style='text-align: center; word-wrap: break-word;'>2,900.00</td><td style='text-align: center; word-wrap: break-word;'>India</td></tr><tr><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>Sub-Total (FOB Mumbai)</td><td colspan="3">20 MT</td><td style='text-align: center; word-wrap: break-word;'>21,660.00</td><td style='text-align: center; word-wrap: break-word;'></td></tr><tr><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>Sea Freight (Mumbai → Jebel Ali)</td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>1,200.00</td><td style='text-align: center; word-wrap: break-word;'></td></tr><tr><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>Marine Insurance (0.15% of CIF)</td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>325.00</td><td style='text-align: center; word-wrap: break-word;'></td></tr><tr><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>GRAND TOTAL (CIF Jebel Ali)</td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'></td><td style='text-align: center; word-wrap: break-word;'>USD 23,185.00</td><td style='text-align: center; word-wrap: break-word;'></td></tr></table>
+- Each local install gets its **own** MCP API key at onboarding — never a
+  shared or embedded key baked into this image.
+- Local SQLite file is not encrypted at rest by default; if your deployment
+  needs that, put it on an encrypted volume.
+- `bank_details` and similar sensitive fields are expected to be encrypted at
+  the application layer before insertion — see comments in `local_schema.sql`.
 
 ---
 
-## Roadmap
+## License
 
-| Phase | Timeline | Deliverables |
-|-------|----------|-------------|
-| **1 — MVP** | Q1 2025 | WhatsApp intake, Invoice + Packing List, HS validation, HITL, tracking dashboard |
-| **2 — Full Agents** | Q2 2025 | All 6 agents, Compliance + Finance live, Tally/Zoho ERP, Certificate of Origin |
-| **3 — GCC Expansion** | Q3 2025 | Arabic docs, Saudi/Qatar/Oman corridors, VAT workflows, multi-language portal |
-| **4 — Enterprise** | Q4 2025 | SAP integration, multi-company, delay prediction, revenue intelligence, RBAC teams |
-| **5 — AI OS** | 2026+ | Conversational ERP, browser-only terminals, autonomous export operations |
+[Choose and state license here — e.g. Apache 2.0 / AGPL, depending on how
+much reuse you want to permit for the local-extraction components vs.
+requiring an MCP subscription to be useful.]
 
----
+## Support
 
-## Long-Term Vision
-
-> **"AI-Native Cloud Operating Infrastructure for Global Trade SMEs"**
-
-- **AI Workforce Terminals** — role-specific AI interfaces, zero local software
-- **Browser-Only Employee Systems** — device becomes a thin terminal
-- **Autonomous Export Operations** — PO to delivery without human touch (except exceptions)
-- **Conversational ERP Replacement** — natural language is the interface
-- **AI-Managed Business Execution Layer** — AI briefs humans, not the other way around
-
-"""
-Shipment 1 — Al Rashid Trading (new buyer)
-  Layer 1: rule-based → confidence 65 → not enough
-  Layer 2: no template yet → miss
-  Layer 3: LLM fires → extracts all fields, confidence 91
-  learn() → INSERT into po_templates, write Redis
-  Cost: LLM call
-
-Shipment 2 — Al Rashid Trading
-  Layer 2: Redis hit → template fills payment_terms + incoterms + port
-  rule-based + template → confidence 88 → sufficient
-  _increment_counter(hit=True) → template_hit_count++
-  Cost: ₹0
-
-Shipment 10 — Al Rashid Trading
-  avg_confidence = 91.4, hit_rate = 89%
-  Layer 2 always fires cleanly
-  Cost: ₹0
-
-Dashboard shows:
-  Al Rashid Trading · 10 shipments · 91% confidence · 89% hit rate
-  
-"""
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| API | FastAPI + uvicorn (async) |
-| DB | PostgreSQL 16 + pgvector |
-| Cache | Redis |
-| Events | SSE / WebSockets |
-| Workflow | Temporal (durable execution) |
-| OCR | PaddleOCR + Azure Document Intelligence |
-| LLMs | OpenAI → Anthropic → Gemini → Ollama |
-| Embeddings | sentence-transformers / OpenAI ada-002 |
-| Auth | JWT + RBAC (custom, no external IdP dependency) |
-| Storage | S3 / GCS |
-| Frontend | Next.js + React (separate repo) |
-| Observability | OpenTelemetry + Prometheus |
-
-Searched for "guardrail"
-Listed directory AI-OS-Export-Documentation
-Listed directory tradeos
-Listed directory agents
-Listed directory core
-Viewed po_extraction.py:1-268
-Viewed .env:1-99
-Viewed requirements.txt:1-79
-Viewed hs_validation.py:1-102
-Searched for "confidence"
-Viewed workflow_engine.py:199-998
-Searched for "HITLOrchestrator"
-Viewed main.py:1-428
-Listed directory api
-Searched for "guard"
-Searched for "validate"
-Searched for "guardrail"
-Searched for "compliance"
-Viewed README.md:1-428
-
-Yes! While the codebase does not use third-party libraries like `guardrails-ai` or NVIDIA’s `NeMo Guardrails` (none are listed in `requirements.txt`), **TradeOS is built from the ground up with structural, regulatory, and operational guardrails**.
-
-Here are the key guardrails implemented in the system:
-
----
-
-### 1. Human-In-The-Loop (HITL) & Confidence Guardrails
-The core design principle of TradeOS is **"AI operates workflows, humans supervise."** 
-* **`HITLOrchestrator` (`tradeos/services/api/main.py`)**: A deterministic decision engine that evaluates every critical step using confidence scores and risk flags:
-  * **Auto-Approve**: Only triggered if the overall confidence is above the auto threshold ($\ge 60\%$ or $\ge 92\%$ depending on configuration) **and** there are no high-severity or critical flags.
-  * **Soft/Optional Review**: Triggered for moderate confidence scores to allow quick, optional human inspection.
-  * **Hard Block / Mandatory Review**: Triggered if the confidence falls below the human threshold ($< 45\%$) or if there are any high-severity risk flags.
-  * **Absolute Block**: Triggered instantly if **any critical compliance flag** is raised, completely stopping automatic downstream execution (e.g., carrier bookings or buyer notification).
-
----
-
-### 2. Regulatory & Compliance Guardrail
-* **`HSCodeValidationAgent` (`tradeos/services/agents/hs_validation.py`)**: Validates extracted HS codes against the WCO schedule, India ITC-HS, and UAE GCC tariffs.
-  * Checks export policies (e.g., *Restricted, Prohibited, Canalized, STE*).
-  * Automatically flags restricted routes or prohibited goods, raising **critical severity flags** that block automatic workflow continuation.
-
----
-
-### 3. LLM Reliability & Fallback Guardrails
-* **LLM Provider Chain (`core/config.py`)**: Protects the system against LLM downtime, rate-limits, or API outages by maintaining a prioritized list of providers (OpenAI $\rightarrow$ Groq $\rightarrow$ xAI $\rightarrow$ Anthropic $\rightarrow$ Gemini $\rightarrow$ Local Ollama). If a higher priority model fails, the system automatically cascades down to ensure execution continuity.
-* **Deterministic Workflow Engine (`tradeos/core/workflow_engine.py`)**: Runs LLMs only as functional tools inside deterministic steps rather than allowing LLMs to orchestrate the workflow itself, ensuring predictable outputs.
-
----
-
-### 4. Security & Data Isolation Guardrails
-* **Multi-Tenant Scoping**: Every database query, state transition, and API endpoint is strictly partitioned by `org_id`.
-* **RBAC & Session Validation (`tradeos/core/rbac.py`)**: Validates JWTs, session expiration, and user activation states strictly before resolving organization context via the `get_org_context` dependency.
-
----
-
-### 5. Cost & Hallucination Guardrails
-* **Three-Layer PO Extraction (`tradeos/services/agents/po_extraction.py`)**: 
-  * **Layer 1** uses high-precision local regex/rules (`RuleBasedExtractor`).
-  * **Layer 2** uses buyer layouts matched from Redis (`TemplateMatcher`).
-  * Only when both layers fail to meet the confidence threshold does the system fall back to **Layer 3 (LLM)**. This acts as a robust cost and hallucination guardrail.
-
----
-
-### Summary of Work Done
-* Scanned the workspace directories and checked files for any external guardrail package integrations.
-* Analyzed `po_extraction.py`, `hs_validation.py`, `workflow_engine.py`, `main.py`, and `README.md` to map out the system's operational and architectural guardrails.
-
----
-
-*Built for India–GCC trade. Extensible to any corridor.*  
-*Target: replace 50% of manual doc workload in Phase 1. Replace the ERP by 2026.*
+Self-hosted local edition: open an issue in this repo.
+Cloud API / MCP access / billing: contact support via your TradeOS Cloud account.
