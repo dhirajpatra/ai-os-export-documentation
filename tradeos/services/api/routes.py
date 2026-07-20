@@ -1165,7 +1165,7 @@ async def action_approval(
         if body.action == "approve" and row["order_id"]:
             # Update order status
             await db.execute(
-                "UPDATE orders SET status = 'documents_ready' WHERE id = $1",
+                "UPDATE orders SET status = 'approved' WHERE id = $1",
                 row["order_id"],
             )
 

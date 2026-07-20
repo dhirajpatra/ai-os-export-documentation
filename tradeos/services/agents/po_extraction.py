@@ -57,20 +57,14 @@ Do not hallucinate values.
         # Per-org extraction rules loaded in step_extract_po and passed through
         org_rules = input_data.get("_org_rules", {})
 
-        # Skip early exits for formal PDFs, long text, or multi-item documents
-        is_file = (source == "file" or bool(input_data.get("file_bytes")))
-        is_long_text = len(raw_text) > 1000
-        is_multi = self._is_multi_item(raw_text)
-        force_llm = is_file or is_long_text or is_multi
-
         # ── LAYER 1: Rule-based extraction ───────────────────────────────
         rule_result = RuleBasedExtractor.extract(raw_text, org_overrides=org_rules)
         print(
             f"[POExtraction] Layer1/rule-based confidence={rule_result['confidence']:.1f} "
-            f"threshold={cfg.CONFIDENCE_THRESHOLD_AUTO} force_llm={force_llm}"
+            f"threshold={cfg.CONFIDENCE_THRESHOLD_AUTO}"
         )
 
-        if not force_llm and rule_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
+        if rule_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
             print("[POExtraction] ✅ Rule-based sufficient — skipping LLM")
             self._emit_event("po.extracted", {
                 "org_id":                str(self.org_id),
@@ -95,7 +89,7 @@ Do not hallucinate values.
                 f"[POExtraction] Layer2/template confidence={tm_result['confidence']:.1f} "
                 f"buyer='{tm_result.get('_template_buyer')}'"
             )
-            if not force_llm and tm_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
+            if tm_result["confidence"] >= cfg.CONFIDENCE_THRESHOLD_AUTO:
                 print("[POExtraction] ✅ Template match sufficient — skipping LLM")
                 self._emit_event("po.extracted", {
                     "org_id":                str(self.org_id),
