@@ -641,6 +641,13 @@ def build_po_to_dispatch_workflow(org_id: str, source: str, raw_input: dict) -> 
         decision = HITLOrchestrator.evaluate(
             "doc_generation", ctx.overall_confidence, ctx.risk_flags
         )
+
+        # Auto-verify if coming from whatsapp
+        if ctx.raw_input.get("buyer_whatsapp"):
+            decision["requires_human"] = False
+            decision["decision"] = "auto_approve"
+            decision["reason"] = "Auto-verified: WhatsApp source bypasses HITL"
+            
         print(f"[HITL] decision={decision['decision']}  confidence={ctx.overall_confidence}  "
               f"risk_flags={ctx.risk_flags}  reason={decision['reason']}")
 
